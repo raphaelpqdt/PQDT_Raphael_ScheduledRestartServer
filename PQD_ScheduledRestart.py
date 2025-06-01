@@ -1204,7 +1204,7 @@ class ServerRestarterApp:
     # DENTRO da classe ServerRestarterApp
     def __init__(self, root):
         self.root = root
-        self.root.title("PredPy Server Auto-Restarter - Multi-Servidor")
+        self.root.title("PQDT_Raphael Server Auto-Restarter - Multi-Servidor")
         self.root.geometry("900x750")
         self.tray_icon = None
         self.app_icon_tk = None
