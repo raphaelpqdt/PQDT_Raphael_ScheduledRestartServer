@@ -5,9 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="da42ce71-7727-411b-a076-eea0814f8c91" name="Changes" comment="versão 1.1">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/PQD_ScheduledRestart.exe" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/PQD_ScheduledRestart.py" beforeDir="false" afterPath="$PROJECT_DIR$/PQD_ScheduledRestart.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/PQDT_Raphael Scheduled Restart Server.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/PQDT_Raphael Scheduled Restart Server.iml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -30,12 +28,12 @@
     &quot;assignee&quot;: &quot;raphaelpqdt&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings">{
-  &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/raphaelpqdt/PQDT_Raphael_ScheduledRestartServer.git&quot;,
-    &quot;accountId&quot;: &quot;1464bf48-d1b9-4c9e-a466-452a5f09f8b5&quot;
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "git@github.com:/raphaelpqdt/PQDT_Raphael_ScheduledRestartServer.git",
+    "accountId": "31382edb-3eb8-47ec-b09e-31a6ab1ac3a3"
   }
-}</component>
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 4
 }</component>
@@ -44,23 +42,24 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;Python.PQD_ScheduledRestart.executor&quot;: &quot;Run&quot;,
-    &quot;Python.teste pillow.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/rapha/Documents/GitHub/PQDT_Raphael Scheduled Restart Server&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.PQD_ScheduledRestart.executor": "Run",
+    "Python.teste pillow.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "master",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "/home/pqd/PycharmProjects/PQDT_Raphael_ScheduledRestartServer",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="C:\Users\rapha\Documents\GitHub\PQDT_Raphael Scheduled Restart Server" />
@@ -69,8 +68,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-6a121458b545-JavaScript-PY-251.25410.159" />
-        <option value="bundled-python-sdk-e0ed3721d81e-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.25410.159" />
+        <option value="bundled-js-predefined-d6986cc7102b-b26f3e71634d-JavaScript-PY-251.26094.114" />
+        <option value="bundled-python-sdk-e110c7e0a76d-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.26094.114" />
       </set>
     </attachedChunks>
   </component>
@@ -85,6 +84,7 @@
       <workItem from="1748805796829" duration="613000" />
       <workItem from="1748865437861" duration="5026000" />
       <workItem from="1749213911861" duration="1584000" />
+      <workItem from="1749408400158" duration="624000" />
     </task>
     <task id="LOCAL-00001" summary="versão 1.1">
       <option name="closed" value="true" />
@@ -140,7 +140,8 @@
     <option name="LAST_COMMIT_MESSAGE" value="versão 1.1" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/PQDT_Raphael_Scheduled_Restart_Server$PQD_ScheduledRestart.coverage" NAME="PQD_ScheduledRestart Coverage Results" MODIFIED="1749213958323" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/PQDT_Raphael_Scheduled_Restart_Server$teste_pillow.coverage" NAME="teste pillow Coverage Results" MODIFIED="1748791944532" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/PQDT_Raphael_Scheduled_Restart_Server$PQD_ScheduledRestart.coverage" NAME="PQD_ScheduledRestart Coverage Results" MODIFIED="1749213958323" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/PQDT_Raphael_ScheduledRestartServer$PQD_ScheduledRestart.coverage" NAME="PQD_ScheduledRestart Coverage Results" MODIFIED="1749408978584" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>
