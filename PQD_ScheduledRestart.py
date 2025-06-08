@@ -40,7 +40,7 @@ except ImportError:
     PYWIN32_AVAILABLE = False
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(module)s.%(funcName)s:%(lineno)d - %(message)s',
     filename='server_restarter.log',
     filemode='a',
@@ -346,15 +346,18 @@ class ServidorTab(ttk.Frame):
 
     def _toggle_predefined_schedule(self, hour_int, var):
         hour_str = f"{hour_int:02d}:00"
-        if var.get():
+        if var.get():  # Checkbox marcado
             if hour_str not in self.scheduled_restarts_list:
                 self.scheduled_restarts_list.append(hour_str)
-                logging.info(f"Tab '{self.nome}': Agendamento pré-definido adicionado: {hour_str}")
-        else:
+                logging.info(f"Tab '{self.nome}': Agendamento pré-definido ADICIONADO: {hour_str}")  # Log modificado
+        else:  # Checkbox desmarcado
             if hour_str in self.scheduled_restarts_list:
                 self.scheduled_restarts_list.remove(hour_str)
-                logging.info(f"Tab '{self.nome}': Agendamento pré-definido removido: {hour_str}")
+                logging.info(f"Tab '{self.nome}': Agendamento pré-definido REMOVIDO: {hour_str}")  # Log modificado
+
         self.scheduled_restarts_list = sorted(list(set(self.scheduled_restarts_list)))
+        logging.info(
+            f"Tab '{self.nome}' _toggle_predefined_schedule: Lista de agendamentos atual: {self.scheduled_restarts_list}")  # <--- NOVO LOG
         self._value_changed()
 
     def _add_custom_schedule(self):
@@ -376,7 +379,8 @@ class ServidorTab(ttk.Frame):
 
         self.scheduled_restarts_list.append(time_str)
         self.scheduled_restarts_list = sorted(list(set(self.scheduled_restarts_list)))
-        logging.info(f"Tab '{self.nome}': Agendamento personalizado adicionado: {time_str}")
+        logging.info(
+            f"Tab '{self.nome}': Agendamento personalizado adicionado: {time_str}. Lista atual: {self.scheduled_restarts_list}")  # <--- LOG ATUALIZADO/NOVO
         self._update_scheduled_restarts_ui_from_list()
         self.custom_schedule_entry_var.set("")
         self._value_changed()
@@ -392,12 +396,13 @@ class ServidorTab(ttk.Frame):
 
         if selected_time_str in self.scheduled_restarts_list:
             self.scheduled_restarts_list.remove(selected_time_str)
-            logging.info(f"Tab '{self.nome}': Agendamento personalizado removido: {selected_time_str}")
+            logging.info(
+                f"Tab '{self.nome}': Agendamento personalizado removido: {selected_time_str}. Lista atual: {self.scheduled_restarts_list}")  # <--- LOG ATUALIZADO/NOVO
             self._update_scheduled_restarts_ui_from_list()
             self._value_changed()
         else:
             logging.warning(
-                f"Tab '{self.nome}': Tentativa de remover horário '{selected_time_str}' que não está na lista interna.")
+                f"Tab '{self.nome}': Tentativa de remover horário '{selected_time_str}' que não está na lista interna. Lista atual: {self.scheduled_restarts_list}")  # <--- LOG ATUALIZADO/NOVO
             self._update_scheduled_restarts_ui_from_list()
 
     def start_scheduler_thread(self):
@@ -422,13 +427,23 @@ class ServidorTab(ttk.Frame):
             logging.info(f"Tab '{self.nome}' [{thread_name}]: stop_scheduler_thread completado.")
 
     def _scheduler_worker(self):
-        logging.info(f"Tab '{self.nome}': Thread _scheduler_worker iniciada.")
+        # logging.info(f"Tab '{self.nome}': Thread _scheduler_worker iniciada.") # Esta linha já existe e é boa, mas a de baixo é para um teste mais granular
+
+        # ---> ADICIONE ESTA LINHA EXATAMENTE AQUI <---
+        logging.debug(f"Tab '{self.nome}': _scheduler_worker EXECUTANDO - INÍCIO DO MÉTODO.")
+
         while not self._scheduler_stop_event.is_set():
             try:
-                current_time_obj = datetime.now()
+                # Logs para depuração (descomentados ou adicionados)
+                current_time_obj = datetime.now()  # Movido para dentro do try para o caso de datetime.now() falhar (improvável)
                 current_time_str_hh_mm = current_time_obj.strftime("%H:%M")
 
+                logging.debug(
+                    f"Tab '{self.nome}' Scheduler Tick: Hora Atual={current_time_str_hh_mm}, Agendamentos={self.scheduled_restarts_list}, ÚltimoProcessadoMinuto={self.last_scheduled_restart_processed_time_str}, ServiçoCfg='{self.nome_servico.get()}'")
+
                 if self.last_scheduled_restart_processed_time_str != current_time_str_hh_mm:
+                    logging.debug(
+                        f"Tab '{self.nome}' Scheduler: Resetando last_scheduled_restart_processed_time_str (era {self.last_scheduled_restart_processed_time_str}, agora é novo minuto {current_time_str_hh_mm}).")
                     self.last_scheduled_restart_processed_time_str = None
 
                 if not self.scheduled_restarts_list:
@@ -440,10 +455,12 @@ class ServidorTab(ttk.Frame):
                     if self._scheduler_stop_event.wait(20): break
                     continue
 
-                if current_time_str_hh_mm in self.scheduled_restarts_list and \
-                        self.last_scheduled_restart_processed_time_str != current_time_str_hh_mm:
+                should_restart_now = (current_time_str_hh_mm in self.scheduled_restarts_list and
+                                      self.last_scheduled_restart_processed_time_str != current_time_str_hh_mm)
+
+                if should_restart_now:
                     logging.info(
-                        f"Tab '{self.nome}': Horário agendado {current_time_str_hh_mm} atingido. Iniciando reinício do serviço '{service_to_restart}'.")
+                        f"Tab '{self.nome}' Scheduler: CONDIÇÃO DE REINÍCIO AGENDADO ATINGIDA! Hora: {current_time_str_hh_mm}. Serviço: '{service_to_restart}'. Iniciando processo de reinício.")
                     self.append_text_to_log_area_threadsafe(
                         f"--- REINÍCIO AGENDADO ({current_time_str_hh_mm}) DO SERVIÇO '{service_to_restart}' INICIADO ---\n"
                     )
@@ -455,14 +472,28 @@ class ServidorTab(ttk.Frame):
                         daemon=True,
                         name=f"ScheduledRestartExec-{self.nome}-{current_time_str_hh_mm}"
                     ).start()
+
                     self.last_scheduled_restart_processed_time_str = current_time_str_hh_mm
+                    logging.info(
+                        f"Tab '{self.nome}' Scheduler: Horário {current_time_str_hh_mm} marcado como processado para este minuto.")
+                # else: # Logs de depuração opcionais
+                # if not (current_time_str_hh_mm in self.scheduled_restarts_list) and self.scheduled_restarts_list: # Só loga se a lista não estiver vazia
+                #    logging.debug(f"Tab '{self.nome}' Scheduler: Hora {current_time_str_hh_mm} NÃO está na lista de agendamentos: {self.scheduled_restarts_list}")
+                # elif self.last_scheduled_restart_processed_time_str == current_time_str_hh_mm and self.scheduled_restarts_list: # Só loga se a lista não estiver vazia
+                #    logging.debug(f"Tab '{self.nome}' Scheduler: Hora {current_time_str_hh_mm} JÁ FOI PROCESSADA neste minuto.")
+
+
             except Exception as e_scheduler:
                 logging.error(f"Tab '{self.nome}': Erro no _scheduler_worker: {e_scheduler}", exc_info=True)
                 self.append_text_to_log_area_threadsafe(f"ERRO CRÍTICO NO SCHEDULER: {e_scheduler}\n")
+
             if self._scheduler_stop_event.wait(15):
                 break
-        logging.info(f"Tab '{self.nome}': Thread _scheduler_worker encerrada.")
 
+        logging.info(
+            f"Tab '{self.nome}': Thread _scheduler_worker encerrada (evento de parada: {self._scheduler_stop_event.is_set()}).")  # Adicionado info sobre o evento
+
+    # Dentro de ServidorTab
     def initialize_from_config_vars(self):
         default_fg = "black"
         try:
@@ -476,10 +507,13 @@ class ServidorTab(ttk.Frame):
             self.append_text_to_log_area(f">>> Pasta de logs configurada: {pasta_raiz_val}\n")
             self.log_folder_path_label_var.set(f"Pasta Logs: {os.path.basename(pasta_raiz_val)}")
             self.log_folder_path_label.config(foreground="green")
-            self.start_log_monitoring()
+            self.start_log_monitoring()  # Inicia/reinicia monitor de LOGS
         elif pasta_raiz_val:
             self.log_folder_path_label_var.set(f"Pasta Logs (INVÁLIDA): {os.path.basename(pasta_raiz_val)}")
             self.log_folder_path_label.config(foreground="red")
+            # Se a pasta é inválida, o monitor de logs não inicia, mas o scheduler PODE rodar
+            # se um serviço estiver configurado. Considerar se o scheduler deve depender da pasta de logs.
+            # Por ora, vamos mantê-los independentes.
         else:
             self.log_folder_path_label_var.set("Pasta Logs: Nenhuma")
             self.log_folder_path_label.config(foreground=default_fg)
@@ -493,7 +527,11 @@ class ServidorTab(ttk.Frame):
         else:
             self.servico_label_var.set("Serviço: Nenhum")
             self.servico_label_widget.config(foreground=default_fg if default_fg != "black" else "orange")
+
         self._update_scheduled_restarts_ui_from_list()
+
+        # ---> ADICIONE/GARANTA ESTA LINHA <---
+        self.start_scheduler_thread()  # Garante que o scheduler seja iniciado/reiniciado aqui
 
     def selecionar_pasta(self):
         pasta_selecionada = filedialog.askdirectory(
@@ -2053,7 +2091,7 @@ class ServerRestarterApp:
         frame = ttk.Frame(about_win, padding=20);
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text="PQDT_Raphael Server Restarter", font="-size 16 -weight bold").pack(pady=(0, 10))
-        ttk.Label(frame, text="Versão 1.1 (Scheduled restart and trigger restart)", font="-size 10").pack()  # Atualiza versão
+        ttk.Label(frame, text="Versão 1.1.1 (Bug fixes)", font="-size 10").pack()  # Atualiza versão
         ttk.Separator(frame).pack(fill='x', pady=10)
         desc = ("Ferramenta para monitorar logs de múltiplos servidores,\n"
                 "detectar uma mensagem de gatilho específica e\n"
