@@ -578,25 +578,60 @@ class ServidorTab(ttk.Frame):
             ))
 
     def _verificar_status_servico_win(self, nome_servico_local):
+        if not PYWIN32_AVAILABLE: return "ERROR"
         if not nome_servico_local: return "NOT_FOUND"
         try:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            result = subprocess.run(['sc', 'query', nome_servico_local], capture_output=True, text=False,
-                                    startupinfo=startupinfo)
-            output = result.stdout.decode('latin-1', 'replace') + result.stderr.decode('latin-1', 'replace')
-            output_lower = output.lower()
-
-            if "1060" in output_lower or "does not exist" in output_lower or "nÆo existe" in output_lower:
+            startupinfo = None
+            if platform.system() == "Windows":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+            encodings_to_try = ['latin-1', 'utf-8', 'cp850', 'cp1252']
+            output_text = None
+            for enc in encodings_to_try:
+                try:
+                    result = subprocess.run(
+                        ['sc', 'query', nome_servico_local],
+                        capture_output=True, text=False, check=False, startupinfo=startupinfo
+                    )
+                    stdout_decoded = result.stdout.decode(enc, errors='replace')
+                    stderr_decoded = result.stderr.decode(enc, errors='replace')
+                    output_text = stdout_decoded + stderr_decoded
+                    break
+                except UnicodeDecodeError:
+                    logging.debug(f"Tab '{self.nome}': Falha decode 'sc query' com {enc} para '{nome_servico_local}'.")
+                except Exception as e_run:
+                    logging.error(f"Tab '{self.nome}': Erro 'sc query' para '{nome_servico_local}': {e_run}",
+                                  exc_info=True)
+                    return "ERROR"
+            if output_text is None:
+                logging.error(f"Tab '{self.nome}': Impossível decodificar 'sc query' para '{nome_servico_local}'.")
+                return "ERROR"
+            output_lower = output_text.lower()
+            service_not_found_errors = [
+                "failed 1060", "falha 1060", "o servi‡o especificado nÆo existe como servi‡o instalado",
+                "specified service does not exist as an installed service"
+            ]
+            if any(err_str in output_lower for err_str in service_not_found_errors):
+                logging.warning(
+                    f"Tab '{self.nome}': Serviço '{nome_servico_local}' não encontrado. Output: {output_text[:100]}")
                 return "NOT_FOUND"
-            if "running" in output_lower: return "RUNNING"
-            if "stopped" in output_lower: return "STOPPED"
-            if "start_pending" in output_lower: return "START_PENDING"
-            if "stop_pending" in output_lower: return "STOP_PENDING"
+            if "state" not in output_lower:
+                logging.warning(
+                    f"Tab '{self.nome}': Saída 'sc query {nome_servico_local}' inesperada: {output_text[:100]}")
+                return "ERROR"
+            if "running" in output_lower or "em execu‡Æo" in output_lower: return "RUNNING"
+            if "stopped" in output_lower or "parado" in output_lower: return "STOPPED"
+            if "start_pending" in output_lower or "pendente deinÝcio" in output_lower: return "START_PENDING"
+            if "stop_pending" in output_lower or "pendente deparada" in output_lower: return "STOP_PENDING"
+            logging.info(f"Tab '{self.nome}': Status desconhecido para '{nome_servico_local}': {output_text[:100]}")
             return "UNKNOWN"
-        except (FileNotFoundError, Exception) as e:
-            logging.error(f"Erro ao verificar serviço '{nome_servico_local}' no Windows: {e}", exc_info=True)
+        except FileNotFoundError:
+            logging.error(f"Tab '{self.nome}': 'sc.exe' não encontrado.", exc_info=True)
+            return "ERROR"
+        except Exception as e:
+            logging.error(f"Tab '{self.nome}': Erro ao verificar status do serviço '{nome_servico_local}': {e}",
+                          exc_info=True)
             return "ERROR"
 
     def _verificar_status_servico_linux(self, nome_servico_local):
@@ -609,7 +644,6 @@ class ServidorTab(ttk.Frame):
 
         for nome_tentativa in nomes_a_tentar:
             try:
-                # 'is-active' é mais rápido e direto
                 result = subprocess.run(['systemctl', 'is-active', nome_tentativa], capture_output=True, text=True,
                                         timeout=5)
                 status = result.stdout.strip()
@@ -618,33 +652,36 @@ class ServidorTab(ttk.Frame):
                 if status == "activating": return "START_PENDING"
                 if status == "deactivating": return "STOP_PENDING"
                 if status == "failed": return "ERROR"
-                # Se o status é 'unknown', pode ser que a unidade não exista, vamos checar com 'status'
                 if result.returncode != 0:
                     status_result = subprocess.run(['systemctl', 'status', nome_tentativa], capture_output=True,
                                                    text=True, timeout=5)
-                    if status_result.returncode == 4:  # Unit not found
-                        continue  # Tenta o próximo nome na lista
+                    if status_result.returncode == 4:
+                        continue
                 return "UNKNOWN"
             except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
                 logging.error(f"Erro ao verificar serviço '{nome_tentativa}' no Linux: {e}", exc_info=True)
                 return "ERROR"
-
-        return "NOT_FOUND"  # Se nenhum nome funcionou
+        return "NOT_FOUND"
 
     def start_log_monitoring(self):
-        if self.log_monitor_thread and self.log_monitor_thread.is_alive(): return
-        if not self.pasta_raiz.get() or not os.path.isdir(self.pasta_raiz.get()): return
+        if self.log_monitor_thread and self.log_monitor_thread.is_alive():
+            return
+        if not self.pasta_raiz.get() or not os.path.isdir(self.pasta_raiz.get()):
+            self.append_text_to_log_area(
+                f"AVISO: Pasta de logs '{self.pasta_raiz.get()}' inválida. Monitoramento não iniciado.\n")
+            return
         self._stop_event.clear()
         self.log_monitor_thread = threading.Thread(target=self.monitorar_log_continuamente_worker, daemon=True,
                                                    name=f"LogMonitor-{self.nome}")
         self.log_monitor_thread.start()
+        logging.info(f"Tab '{self.nome}': Monitoramento de logs iniciado para pasta '{self.pasta_raiz.get()}'.")
 
     def stop_log_monitoring(self, from_tab_closure=False):
         self._stop_event.set()
         if self.log_tail_thread and self.log_tail_thread.is_alive():
             self.log_tail_thread.join(timeout=2.0)
         self.log_tail_thread = None
-        if self.log_monitor_thread and self.log_monitor_thread.is_alive():
+        if self.log_monitor_thread and self.log_monitor_thread.is_alive() and self.log_monitor_thread != threading.current_thread():
             self.log_monitor_thread.join(timeout=2.0)
         self.log_monitor_thread = None
         if self.file_log_handle:
@@ -665,69 +702,89 @@ class ServidorTab(ttk.Frame):
             if subpasta_recente:
                 arquivo_log = os.path.join(subpasta_recente, 'console.log')
                 if os.path.exists(arquivo_log) and arquivo_log != self.caminho_log_atual:
-                    self.stop_log_monitoring()  # Para o tail antigo
-                    self._stop_event.clear()  # Limpa o evento para o novo tail
+                    if self.log_tail_thread:
+                        self._stop_event.set()
+                        self.log_tail_thread.join()
+                    self._stop_event.clear()
+
                     self.caminho_log_atual = arquivo_log
+                    self.append_text_to_log_area(f"\n>>> Monitorando novo log: {self.caminho_log_atual}\n")
                     try:
                         self.file_log_handle = open(self.caminho_log_atual, 'r', encoding='latin-1', errors='replace')
                         self.file_log_handle.seek(0, os.SEEK_END)
                         self.log_tail_thread = threading.Thread(target=self.acompanhar_log_do_arquivo_worker,
-                                                                args=(self.caminho_log_atual,), daemon=True)
+                                                                daemon=True, name=f"LogTail-{self.nome}")
                         self.log_tail_thread.start()
                     except Exception as e:
-                        logging.error(f"Erro ao iniciar tail para {self.caminho_log_atual}: {e}")
+                        logging.error(f"Erro ao iniciar tail para {self.caminho_log_atual}: {e}", exc_info=True)
             if self._stop_event.wait(5): break
 
-    def _obter_subpasta_log_mais_recente(self, pasta_raiz):
+    def _obter_subpasta_log_mais_recente(self, pasta_raiz_logs):
+        if not pasta_raiz_logs or not os.path.isdir(pasta_raiz_logs): return None
         try:
+            entradas = os.listdir(pasta_raiz_logs)
             log_folder_pattern = re.compile(r"^logs_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
-            subpastas = [os.path.join(pasta_raiz, d) for d in os.listdir(pasta_raiz)
-                         if os.path.isdir(os.path.join(pasta_raiz, d)) and log_folder_pattern.match(d)]
-            if not subpastas: return None
-            return max(subpastas, key=os.path.getmtime)
-        except Exception:
+            subpastas_log_validas = [os.path.join(pasta_raiz_logs, nome) for nome in entradas if
+                                     os.path.isdir(os.path.join(pasta_raiz_logs, nome)) and log_folder_pattern.match(
+                                         nome)]
+            if not subpastas_log_validas: return None
+            return max(subpastas_log_validas, key=os.path.getmtime)
+        except Exception as e:
+            logging.error(f"Erro ao obter subpasta em '{pasta_raiz_logs}': {e}", exc_info=True)
             return None
 
-    def acompanhar_log_do_arquivo_worker(self, caminho_log_designado):
-        trigger_message = self.trigger_log_message_var.get()
+    def acompanhar_log_do_arquivo_worker(self):
+        trigger_message_to_find = self.trigger_log_message_var.get()
         while not self._stop_event.is_set():
             if self._paused:
-                time.sleep(0.5)
+                if self._stop_event.wait(0.5): break
                 continue
             try:
                 linha = self.file_log_handle.readline()
                 if linha:
-                    self.append_text_to_log_area(linha)
-                    if trigger_message and trigger_message in linha:
+                    linha_strip = linha.strip()
+                    if not self.filtro_var.get() or self.filtro_var.get().lower() in linha.lower():
+                        self.append_text_to_log_area(linha)
+
+                    if trigger_message_to_find and trigger_message_to_find in linha_strip:
+                        logging.info(f"GATILHO DE REINÍCIO detectado. Linha: '{linha_strip}'.")
                         if self.auto_restart_on_trigger_var.get():
                             threading.Thread(target=self._delayed_restart_worker, daemon=True).start()
                 else:
-                    time.sleep(0.2)
-            except Exception:
-                break  # Sai do loop se houver erro de leitura
+                    if self._stop_event.wait(0.2): break
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logging.error(f"Erro ao acompanhar log: {e}", exc_info=True)
+                break
 
     def _delayed_restart_worker(self):
-        delay = self.restart_delay_after_trigger_var.get()
-        self.append_text_to_log_area_threadsafe(f"Gatilho detectado! Aguardando {delay}s para reiniciar...\n")
-        time.sleep(delay)
+        delay_s = self.restart_delay_after_trigger_var.get()
+        self.append_text_to_log_area_threadsafe(f"Gatilho detectado. Aguardando {delay_s}s para reiniciar...\n")
+
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < delay_s:
+            if self._stop_event.is_set():
+                return
+            time.sleep(0.5)
+
         if not self._stop_event.is_set():
             self._executar_logica_reinicio_servico_efetivamente(is_scheduled_restart=False)
 
     def _executar_logica_reinicio_servico_efetivamente(self, is_scheduled_restart=False):
-        tipo = "agendado" if is_scheduled_restart else "por gatilho"
+        tipo_reinicio_msg = "agendado" if is_scheduled_restart else "por gatilho de log"
         nome_servico = self.nome_servico.get()
         if not nome_servico:
-            self.append_text_to_log_area_threadsafe("ERRO: Serviço não configurado para reinício.\n")
+            self.append_text_to_log_area_threadsafe("ERRO: Nome do serviço não configurado para reinício.\n")
             return
 
-        success = self._operar_servico_com_delays(nome_servico, tipo)
+        success = self._operar_servico_com_delays(nome_servico, tipo_reinicio_msg)
         if self.app.root.winfo_exists():
             if success:
-                self.app.show_messagebox_from_thread("info", "Sucesso",
-                                                     f"Serviço '{nome_servico}' reiniciado com sucesso.")
+                self.app.show_messagebox_from_thread("info", "Servidor Reiniciado",
+                                                     f"O serviço {nome_servico} foi reiniciado com sucesso.")
             else:
-                self.app.show_messagebox_from_thread("error", "Falha",
-                                                     f"Falha ao reiniciar o serviço '{nome_servico}'.")
+                self.app.show_messagebox_from_thread("error", "Falha no Reinício",
+                                                     f"Ocorreu um erro ao reiniciar o serviço {nome_servico}.")
             if self.winfo_exists(): self.update_service_status_display()
 
     def _operar_servico_com_delays(self, nome_servico_a_gerenciar, tipo_reinicio_msg_log=""):
@@ -737,12 +794,12 @@ class ServidorTab(ttk.Frame):
         elif os_system == "Linux":
             return self._operar_servico_com_delays_linux(nome_servico_a_gerenciar, tipo_reinicio_msg_log)
         else:
-            self.append_text_to_log_area_threadsafe(f"ERRO: SO {os_system} não suportado para esta operação.\n")
+            self.append_text_to_log_area_threadsafe(f"ERRO: SO {os_system} não suportado.\n")
             return False
 
     def _operar_servico_com_delays_windows(self, nome_servico, tipo_reinicio=""):
-        stop_delay = self.stop_delay_var.get()
-        start_delay = self.start_delay_var.get()
+        stop_delay_s = self.stop_delay_var.get()
+        start_delay_s = self.start_delay_var.get()
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
@@ -751,26 +808,20 @@ class ServidorTab(ttk.Frame):
         try:
             self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico}'...\n")
             subprocess.run(["sc", "stop", nome_servico], check=True, startupinfo=startupinfo, timeout=30)
-            time.sleep(stop_delay)
-
+            time.sleep(stop_delay_s)
             self.append_text_to_log_area_threadsafe(f"Iniciando serviço '{nome_servico}'...\n")
             subprocess.run(["sc", "start", nome_servico], check=True, startupinfo=startupinfo, timeout=30)
-            time.sleep(start_delay)
+            time.sleep(start_delay_s)
 
-            status_final = self._verificar_status_servico_win(nome_servico)
-            if status_final == "RUNNING":
+            if self._verificar_status_servico_win(nome_servico) == "RUNNING":
                 return True
-            else:
-                self.append_text_to_log_area_threadsafe(f"ERRO: Serviço não iniciou. Status final: {status_final}\n")
-                return False
         except Exception as e:
-            self.append_text_to_log_area_threadsafe(f"ERRO ao operar serviço Windows: {e}\n")
             logging.error(f"{log_prefix} Erro ao operar serviço: {e}", exc_info=True)
-            return False
+        return False
 
     def _operar_servico_com_delays_linux(self, nome_servico, tipo_reinicio=""):
-        stop_delay = self.stop_delay_var.get()
-        start_delay = self.start_delay_var.get()
+        stop_delay_s = self.stop_delay_var.get()
+        start_delay_s = self.start_delay_var.get()
         log_prefix = f"Tab '{self.nome}' ({tipo_reinicio.strip()}) Linux:"
 
         nome_servico_systemd = nome_servico
@@ -781,24 +832,18 @@ class ServidorTab(ttk.Frame):
             self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico_systemd}'...\n")
             subprocess.run(['sudo', 'systemctl', 'stop', nome_servico_systemd], check=True, capture_output=True,
                            timeout=30)
-            time.sleep(stop_delay)
-
+            time.sleep(stop_delay_s)
             self.append_text_to_log_area_threadsafe(f"Iniciando serviço '{nome_servico_systemd}'...\n")
             subprocess.run(['sudo', 'systemctl', 'start', nome_servico_systemd], check=True, capture_output=True,
                            timeout=30)
-            time.sleep(start_delay)
+            time.sleep(start_delay_s)
 
-            status_final = self._verificar_status_servico_linux(nome_servico_systemd)
-            if status_final == "RUNNING":
+            if self._verificar_status_servico_linux(nome_servico_systemd) == "RUNNING":
                 return True
-            else:
-                self.append_text_to_log_area_threadsafe(f"ERRO: Serviço não iniciou. Status final: {status_final}\n")
-                return False
         except Exception as e:
             err_output = e.stderr.decode(errors='replace').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
-            self.append_text_to_log_area_threadsafe(f"ERRO ao operar serviço Linux: {err_output}\n")
             logging.error(f"{log_prefix} Erro ao operar serviço: {err_output}", exc_info=True)
-            return False
+        return False
 
     def append_text_to_log_area(self, texto):
         if not self.winfo_exists(): return
@@ -1197,13 +1242,15 @@ class ServerRestarterApp:
 
     def export_current_tab_logs(self):
         current_tab_widget = self.get_current_servidor_tab_widget()
-        if current_tab_widget:
-            self._export_text_widget_content(current_tab_widget.text_area_log, f"Logs de '{current_tab_widget.nome}'")
-        elif self.main_notebook.tab(self.main_notebook.select(), "text").startswith("Log do Sistema"):
-            self._export_text_widget_content(self.system_log_text_area, "Log do Sistema do Restarter")
-        else:
-            self.show_messagebox_from_thread("info", "Exportar Logs",
-                                             "Selecione uma aba de servidor ou Log do Sistema.")
+        if not current_tab_widget:
+            if self.main_notebook.index("current") != -1 and \
+                    self.main_notebook.tab(self.main_notebook.select(), "text").startswith("Log do Sistema"):
+                self._export_text_widget_content(self.system_log_text_area, "Log do Sistema do Restarter")
+            else:
+                self.show_messagebox_from_thread("info", "Exportar Logs",
+                                                 "Selecione uma aba de servidor ou Log do Sistema.")
+            return
+        self._export_text_widget_content(current_tab_widget.text_area_log, f"Logs de '{current_tab_widget.nome}'")
 
     def _export_text_widget_content(self, text_widget, default_filename_part):
         caminho_arquivo = filedialog.asksaveasfilename(
@@ -1239,7 +1286,7 @@ class ServerRestarterApp:
 
         # Adiciona os textos e widgets
         ttk.Label(frame, text="PQDT_Raphael Server Restarter", font="-size 16 -weight bold").pack(pady=(0, 10))
-        ttk.Label(frame, text="Versão 1.2.1 (Adicionado compatibilidade com Linux services SystemCtl)", font="-size 10").pack()
+        ttk.Label(frame, text="Versão 1.1.1 (Bug fixes)", font="-size 10").pack()
         ttk.Separator(frame).pack(fill='x', pady=10)
 
         desc = ("Ferramenta para monitorar logs de múltiplos servidores,\n"
