@@ -1,6 +1,3 @@
-# ==============================================================================
-# SEÇÃO DE IMPORTAÇÕES E CONFIGURAÇÕES GLOBAIS
-# ==============================================================================
 import os
 import re
 import time
@@ -451,14 +448,15 @@ class ServidorTab(ttk.Frame):
 
         os_system = platform.system()
         can_manage_services = (os_system == "Windows" and PYWIN32_AVAILABLE) or (
-                    os_system == "Linux" and SYSTEMCTL_AVAILABLE)
+                os_system == "Linux" and SYSTEMCTL_AVAILABLE)
 
         if self.servico_btn.winfo_exists():
             self.servico_btn.config(state=NORMAL if can_manage_services else DISABLED)
 
         nome_servico_val = self.nome_servico.get()
         can_refresh_status = bool(nome_servico_val) and (
-                    os_system == "Windows" or (os_system == "Linux" and SYSTEMCTL_AVAILABLE))
+                (os_system == "Windows" and PYWIN32_AVAILABLE) or  # Corrigido para PYWIN32_AVAILABLE aqui
+                (os_system == "Linux" and SYSTEMCTL_AVAILABLE))
 
         if self.refresh_servico_status_btn.winfo_exists():
             self.refresh_servico_status_btn.config(state=NORMAL if can_refresh_status else DISABLED)
@@ -520,7 +518,7 @@ class ServidorTab(ttk.Frame):
     def update_service_status_display(self):
         nome_servico_val = self.nome_servico.get()
         if not nome_servico_val:
-            self.initialize_from_config_vars()
+            self.initialize_from_config_vars()  # Re-avalia o estado dos botões, etc.
             return
 
         os_system = platform.system()
@@ -528,6 +526,9 @@ class ServidorTab(ttk.Frame):
         worker = None
 
         if os_system == "Windows":
+            if not PYWIN32_AVAILABLE:  # Checagem adicional
+                self.initialize_from_config_vars()
+                return
             worker = self._get_and_display_service_status_win_thread_worker
         elif os_system == "Linux":
             if not SYSTEMCTL_AVAILABLE:
@@ -644,24 +645,62 @@ class ServidorTab(ttk.Frame):
 
         for nome_tentativa in nomes_a_tentar:
             try:
-                result = subprocess.run(['systemctl', 'is-active', nome_tentativa], capture_output=True, text=True,
-                                        timeout=5)
+                # Usar `sudo` aqui pode não ser ideal se o script inteiro já roda como root.
+                # Se o script já é root, `sudo` é redundante e pode até falhar se `sudo` não estiver configurado para root.
+                # No entanto, se o script NÃO roda como root, `sudo` é necessário.
+                # Para consistência com _operar_servico_com_delays_linux, vamos manter o sudo por enquanto,
+                # assumindo que o script pode não estar rodando como root ou que o sudo é inofensivo se já for root.
+                cmd = ['sudo', 'systemctl', 'is-active', nome_tentativa]
+                if os.geteuid() == 0:  # Se já é root, não precisa de sudo
+                    cmd = ['systemctl', 'is-active', nome_tentativa]
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 status = result.stdout.strip()
-                if status == "active": return "RUNNING"
-                if status == "inactive": return "STOPPED"
-                if status == "activating": return "START_PENDING"
-                if status == "deactivating": return "STOP_PENDING"
-                if status == "failed": return "ERROR"
-                if result.returncode != 0:
-                    status_result = subprocess.run(['systemctl', 'status', nome_tentativa], capture_output=True,
-                                                   text=True, timeout=5)
-                    if status_result.returncode == 4:
-                        continue
-                return "UNKNOWN"
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-                logging.error(f"Erro ao verificar serviço '{nome_tentativa}' no Linux: {e}", exc_info=True)
+
+                if result.returncode == 0:  # Comando bem sucedido, status é a palavra chave
+                    if status == "active": return "RUNNING"
+                    if status == "inactive": return "STOPPED"
+                    if status == "activating": return "START_PENDING"
+                    if status == "deactivating": return "STOP_PENDING"
+                    # Outros status como "failed" serão tratados abaixo se returncode não for 0
+                elif result.returncode == 3:  # Serviço inativo/parado
+                    return "STOPPED"
+                elif result.returncode == 4:  # Unidade não encontrada
+                    # Continua para a próxima tentativa de nome (se houver)
+                    continue
+                else:  # Outro erro
+                    logging.warning(
+                        f"Tab '{self.nome}': 'systemctl is-active {nome_tentativa}' retornou código {result.returncode}. Output: {status}. Stderr: {result.stderr.strip()}")
+                    # Tenta 'systemctl status' para mais detalhes em caso de 'failed'
+                    if status == "failed": return "ERROR"  # Se is-active reporta failed
+
+                    status_cmd = ['sudo', 'systemctl', 'status', nome_tentativa]
+                    if os.geteuid() == 0:
+                        status_cmd = ['systemctl', 'status', nome_tentativa]
+
+                    status_result = subprocess.run(status_cmd, capture_output=True, text=True, timeout=5)
+                    if "Active: failed" in status_result.stdout:
+                        return "ERROR"
+                    if "Unit " in status_result.stdout and " could not be found." in status_result.stdout:
+                        continue  # Unidade não encontrada, tenta próximo nome
+                    # Se não for um erro claro de 'não encontrado' ou 'failed', retorna UNKNOWN
+                    return "UNKNOWN"
+
+                return "UNKNOWN"  # Se o status não for reconhecido
+
+            except subprocess.TimeoutExpired:
+                logging.error(f"Tab '{self.nome}': Timeout ao verificar serviço '{nome_tentativa}' no Linux.",
+                              exc_info=True)
                 return "ERROR"
-        return "NOT_FOUND"
+            except FileNotFoundError:  # systemctl ou sudo não encontrado
+                logging.error(f"Tab '{self.nome}': Comando 'systemctl' ou 'sudo' não encontrado para verificar status.",
+                              exc_info=True)
+                return "SYSTEMCTL_NOT_FOUND"  # Indica que a ferramenta base está faltando
+            except Exception as e:
+                logging.error(f"Tab '{self.nome}': Erro ao verificar serviço '{nome_tentativa}' no Linux: {e}",
+                              exc_info=True)
+                return "ERROR"
+        return "NOT_FOUND"  # Se nenhum nome tentado foi encontrado
 
     def start_log_monitoring(self):
         if self.log_monitor_thread and self.log_monitor_thread.is_alive():
@@ -679,10 +718,10 @@ class ServidorTab(ttk.Frame):
     def stop_log_monitoring(self, from_tab_closure=False):
         self._stop_event.set()
         if self.log_tail_thread and self.log_tail_thread.is_alive():
-            self.log_tail_thread.join(timeout=2.0)
+            self.log_tail_thread.join(timeout=1.0)  # Reduzido timeout para desligamento mais rápido
         self.log_tail_thread = None
         if self.log_monitor_thread and self.log_monitor_thread.is_alive() and self.log_monitor_thread != threading.current_thread():
-            self.log_monitor_thread.join(timeout=2.0)
+            self.log_monitor_thread.join(timeout=1.0)  # Reduzido timeout
         self.log_monitor_thread = None
         if self.file_log_handle:
             try:
@@ -690,34 +729,81 @@ class ServidorTab(ttk.Frame):
             except Exception:
                 pass
         self.file_log_handle = None
+        self.caminho_log_atual = None  # Limpa o caminho do log atual
 
     def monitorar_log_continuamente_worker(self):
         pasta_raiz_monitorada = self.pasta_raiz.get()
+        logging.info(f"Tab '{self.nome}': Iniciando worker de monitoramento para '{pasta_raiz_monitorada}'")
         while not self._stop_event.is_set():
-            if not os.path.isdir(pasta_raiz_monitorada):
+            if not pasta_raiz_monitorada or not os.path.isdir(pasta_raiz_monitorada):
+                logging.warning(
+                    f"Tab '{self.nome}': Pasta de logs '{pasta_raiz_monitorada}' inválida ou inacessível no loop.")
                 if self._stop_event.wait(10): break
+                pasta_raiz_monitorada = self.pasta_raiz.get()  # Tenta reobter caso tenha mudado
                 continue
 
             subpasta_recente = self._obter_subpasta_log_mais_recente(pasta_raiz_monitorada)
+            novo_arquivo_log = None
             if subpasta_recente:
-                arquivo_log = os.path.join(subpasta_recente, 'console.log')
-                if os.path.exists(arquivo_log) and arquivo_log != self.caminho_log_atual:
-                    if self.log_tail_thread:
-                        self._stop_event.set()
-                        self.log_tail_thread.join()
-                    self._stop_event.clear()
+                novo_arquivo_log = os.path.join(subpasta_recente, 'console.log')
 
-                    self.caminho_log_atual = arquivo_log
-                    self.append_text_to_log_area(f"\n>>> Monitorando novo log: {self.caminho_log_atual}\n")
+            if novo_arquivo_log and os.path.exists(novo_arquivo_log) and novo_arquivo_log != self.caminho_log_atual:
+                logging.info(f"Tab '{self.nome}': Novo arquivo de log detectado: {novo_arquivo_log}")
+
+                # Para a thread de tail existente, se houver
+                if self.log_tail_thread and self.log_tail_thread.is_alive():
+                    # O _stop_event global já deve parar a thread de tail, mas vamos ser explícitos.
+                    # Não precisamos de um evento separado para a tail thread se o _stop_event da aba é suficiente.
+                    # Se self._stop_event.set() for chamado, a tail thread atual deve parar.
+                    # Apenas esperamos que ela termine.
+                    logging.debug(f"Tab '{self.nome}': Aguardando thread de tail anterior finalizar.")
+                    self.log_tail_thread.join(timeout=1.0)
+                    # self._stop_event.clear() # Não limpar aqui, pois o evento é da aba, não só da tail
+
+                if self.file_log_handle:
                     try:
-                        self.file_log_handle = open(self.caminho_log_atual, 'r', encoding='latin-1', errors='replace')
-                        self.file_log_handle.seek(0, os.SEEK_END)
-                        self.log_tail_thread = threading.Thread(target=self.acompanhar_log_do_arquivo_worker,
-                                                                daemon=True, name=f"LogTail-{self.nome}")
-                        self.log_tail_thread.start()
-                    except Exception as e:
-                        logging.error(f"Erro ao iniciar tail para {self.caminho_log_atual}: {e}", exc_info=True)
-            if self._stop_event.wait(5): break
+                        self.file_log_handle.close()
+                    except Exception:
+                        pass
+                    self.file_log_handle = None
+
+                self.caminho_log_atual = novo_arquivo_log
+                self.append_text_to_log_area(f"\n>>> Monitorando novo log: {self.caminho_log_atual}\n")
+                try:
+                    self.file_log_handle = open(self.caminho_log_atual, 'r', encoding='latin-1', errors='replace')
+                    self.file_log_handle.seek(0, os.SEEK_END)  # Vai para o fim do arquivo
+
+                    # Cria e inicia nova thread de tail
+                    self.log_tail_thread = threading.Thread(target=self.acompanhar_log_do_arquivo_worker,
+                                                            daemon=True,
+                                                            name=f"LogTail-{self.nome}-{os.path.basename(self.caminho_log_atual)}")
+                    self.log_tail_thread.start()
+                    logging.info(f"Tab '{self.nome}': Nova thread de tail iniciada para {self.caminho_log_atual}")
+                except FileNotFoundError:
+                    logging.error(
+                        f"Tab '{self.nome}': Arquivo {self.caminho_log_atual} não encontrado ao tentar abrir para tail.")
+                    self.caminho_log_atual = None  # Reseta se não conseguiu abrir
+                except Exception as e:
+                    logging.error(f"Tab '{self.nome}': Erro ao iniciar tail para {self.caminho_log_atual}: {e}",
+                                  exc_info=True)
+                    self.caminho_log_atual = None  # Reseta
+            elif self.caminho_log_atual and not os.path.exists(self.caminho_log_atual):
+                logging.warning(
+                    f"Tab '{self.nome}': Arquivo de log monitorado {self.caminho_log_atual} não existe mais.")
+                self.append_text_to_log_area(
+                    f"AVISO: Log {self.caminho_log_atual} não encontrado. Procurando novo log...\n")
+                self.caminho_log_atual = None  # Força a busca por um novo log na próxima iteração
+                if self.log_tail_thread and self.log_tail_thread.is_alive():
+                    self.log_tail_thread.join(timeout=1.0)
+                if self.file_log_handle:
+                    try:
+                        self.file_log_handle.close()
+                    except:
+                        pass
+                    self.file_log_handle = None
+
+            if self._stop_event.wait(5): break  # Espera 5 segundos ou até o evento de parada
+        logging.info(f"Tab '{self.nome}': Worker de monitoramento de log encerrado.")
 
     def _obter_subpasta_log_mais_recente(self, pasta_raiz_logs):
         if not pasta_raiz_logs or not os.path.isdir(pasta_raiz_logs): return None
@@ -730,15 +816,29 @@ class ServidorTab(ttk.Frame):
             if not subpastas_log_validas: return None
             return max(subpastas_log_validas, key=os.path.getmtime)
         except Exception as e:
-            logging.error(f"Erro ao obter subpasta em '{pasta_raiz_logs}': {e}", exc_info=True)
+            logging.error(f"Tab '{self.nome}': Erro ao obter subpasta em '{pasta_raiz_logs}': {e}", exc_info=True)
             return None
 
     def acompanhar_log_do_arquivo_worker(self):
         trigger_message_to_find = self.trigger_log_message_var.get()
+        current_file_path = self.caminho_log_atual  # Captura o caminho no início da thread
+        logging.info(f"Tab '{self.nome}': Iniciando acompanhamento de log para {current_file_path}")
+
+        if not self.file_log_handle or self.file_log_handle.closed:
+            logging.error(
+                f"Tab '{self.nome}': file_log_handle nulo ou fechado no início de acompanhar_log para {current_file_path}.")
+            return
+
         while not self._stop_event.is_set():
             if self._paused:
                 if self._stop_event.wait(0.5): break
                 continue
+
+            # Verifica se o arquivo monitorado ainda é o mesmo ou se o handle foi fechado
+            if not self.file_log_handle or self.file_log_handle.closed or self.caminho_log_atual != current_file_path:
+                logging.info(
+                    f"Tab '{self.nome}': Encerrando thread de tail para {current_file_path} devido a mudança de arquivo ou handle fechado.")
+                break
             try:
                 linha = self.file_log_handle.readline()
                 if linha:
@@ -747,15 +847,27 @@ class ServidorTab(ttk.Frame):
                         self.append_text_to_log_area(linha)
 
                     if trigger_message_to_find and trigger_message_to_find in linha_strip:
-                        logging.info(f"GATILHO DE REINÍCIO detectado. Linha: '{linha_strip}'.")
+                        logging.info(
+                            f"Tab '{self.nome}': GATILHO DE REINÍCIO detectado em '{current_file_path}'. Linha: '{linha_strip}'.")
                         if self.auto_restart_on_trigger_var.get():
-                            threading.Thread(target=self._delayed_restart_worker, daemon=True).start()
-                else:
+                            threading.Thread(target=self._delayed_restart_worker, daemon=True,
+                                             name=f"DelayedRestart-{self.nome}").start()
+                else:  # Fim do arquivo, espera um pouco
                     if self._stop_event.wait(0.2): break
+            except ValueError as ve:  # Ex: I/O operation on closed file
+                if "closed file" in str(ve).lower():
+                    logging.warning(
+                        f"Tab '{self.nome}': Tentativa de I/O em arquivo fechado ({current_file_path}). Encerrando tail.")
+                else:
+                    logging.error(f"Tab '{self.nome}': ValueError ao acompanhar log {current_file_path}: {ve}",
+                                  exc_info=True)
+                break  # Sai do loop se o arquivo estiver fechado ou outro ValueError
             except Exception as e:
-                if not self._stop_event.is_set():
-                    logging.error(f"Erro ao acompanhar log: {e}", exc_info=True)
+                if not self._stop_event.is_set():  # Só loga se não for um encerramento esperado
+                    logging.error(f"Tab '{self.nome}': Erro inesperado ao acompanhar log {current_file_path}: {e}",
+                                  exc_info=True)
                 break
+        logging.info(f"Tab '{self.nome}': Acompanhamento de log para {current_file_path} encerrado.")
 
     def _delayed_restart_worker(self):
         delay_s = self.restart_delay_after_trigger_var.get()
@@ -763,38 +875,60 @@ class ServidorTab(ttk.Frame):
 
         start_time = time.monotonic()
         while time.monotonic() - start_time < delay_s:
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or self._scheduler_stop_event.is_set():  # Checa ambos
+                logging.info(f"Tab '{self.nome}': Reinício atrasado cancelado.")
                 return
-            time.sleep(0.5)
+            time.sleep(0.5)  # Permite que o evento seja checado mais frequentemente
 
-        if not self._stop_event.is_set():
+        if not self._stop_event.is_set() and not self._scheduler_stop_event.is_set():
             self._executar_logica_reinicio_servico_efetivamente(is_scheduled_restart=False)
+        else:
+            logging.info(f"Tab '{self.nome}': Reinício atrasado cancelado antes da execução.")
 
     def _executar_logica_reinicio_servico_efetivamente(self, is_scheduled_restart=False):
         tipo_reinicio_msg = "agendado" if is_scheduled_restart else "por gatilho de log"
         nome_servico = self.nome_servico.get()
         if not nome_servico:
-            self.append_text_to_log_area_threadsafe("ERRO: Nome do serviço não configurado para reinício.\n")
+            self.append_text_to_log_area_threadsafe(
+                f"ERRO: Nome do serviço não configurado para reinício ({tipo_reinicio_msg}).\n")
+            logging.error(f"Tab '{self.nome}': Tentativa de reinício ({tipo_reinicio_msg}) sem nome de serviço.")
             return
 
+        self.append_text_to_log_area_threadsafe(
+            f"--- REINÍCIO {tipo_reinicio_msg.upper()} DO SERVIÇO '{nome_servico}' INICIADO ---\n")
         success = self._operar_servico_com_delays(nome_servico, tipo_reinicio_msg)
-        if self.app.root.winfo_exists():
+
+        if self.app.root.winfo_exists():  # Só mostra messagebox se a UI ainda existe
             if success:
-                self.app.show_messagebox_from_thread("info", "Servidor Reiniciado",
-                                                     f"O serviço {nome_servico} foi reiniciado com sucesso.")
+                self.app.show_messagebox_from_thread("info", f"'{self.nome}': Servidor Reiniciado",
+                                                     f"O serviço '{nome_servico}' foi reiniciado com sucesso ({tipo_reinicio_msg}).")
+                self.append_text_to_log_area_threadsafe(
+                    f"SUCESSO: Serviço '{nome_servico}' reiniciado ({tipo_reinicio_msg}).\n")
             else:
-                self.app.show_messagebox_from_thread("error", "Falha no Reinício",
-                                                     f"Ocorreu um erro ao reiniciar o serviço {nome_servico}.")
-            if self.winfo_exists(): self.update_service_status_display()
+                self.app.show_messagebox_from_thread("error", f"'{self.nome}': Falha no Reinício",
+                                                     f"Ocorreu um erro ao reiniciar ({tipo_reinicio_msg}) o serviço '{nome_servico}'.\nVerifique os logs.")
+                self.append_text_to_log_area_threadsafe(
+                    f"FALHA: Erro ao reiniciar '{nome_servico}' ({tipo_reinicio_msg}). Verifique os logs.\n")
+
+            if self.winfo_exists():  # Atualiza o status na aba
+                self.update_service_status_display()
 
     def _operar_servico_com_delays(self, nome_servico_a_gerenciar, tipo_reinicio_msg_log=""):
         os_system = platform.system()
         if os_system == "Windows":
+            if not PYWIN32_AVAILABLE:
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: pywin32 não disponível para operar serviço no Windows.\n")
+                return False
             return self._operar_servico_com_delays_windows(nome_servico_a_gerenciar, tipo_reinicio_msg_log)
         elif os_system == "Linux":
+            if not SYSTEMCTL_AVAILABLE:
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: systemctl não disponível para operar serviço no Linux.\n")
+                return False
             return self._operar_servico_com_delays_linux(nome_servico_a_gerenciar, tipo_reinicio_msg_log)
         else:
-            self.append_text_to_log_area_threadsafe(f"ERRO: SO {os_system} não suportado.\n")
+            self.append_text_to_log_area_threadsafe(f"ERRO: Operação de serviço não suportada no SO {os_system}.\n")
             return False
 
     def _operar_servico_com_delays_windows(self, nome_servico, tipo_reinicio=""):
@@ -806,18 +940,87 @@ class ServidorTab(ttk.Frame):
         log_prefix = f"Tab '{self.nome}' ({tipo_reinicio.strip()}) Win:"
 
         try:
-            self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico}'...\n")
-            subprocess.run(["sc", "stop", nome_servico], check=True, startupinfo=startupinfo, timeout=30)
-            time.sleep(stop_delay_s)
+            # Parar o serviço
+            status_atual = self._verificar_status_servico_win(nome_servico)
+            if status_atual == "RUNNING" or status_atual == "START_PENDING":
+                self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico}'...\n")
+                subprocess.run(["sc", "stop", nome_servico], check=True, startupinfo=startupinfo, timeout=30)
+                self.append_text_to_log_area_threadsafe(f"Comando de parada enviado. Aguardando {stop_delay_s}s...\n")
+
+                wait_start = time.monotonic()
+                while time.monotonic() - wait_start < stop_delay_s:
+                    if self._stop_event.is_set() or self._scheduler_stop_event.is_set():
+                        logging.info(f"{log_prefix} Operação de serviço interrompida durante delay de parada.")
+                        return False
+                    time.sleep(0.1)
+
+                status_apos_parada = self._verificar_status_servico_win(nome_servico)
+                if status_apos_parada != "STOPPED":
+                    logging.warning(
+                        f"{log_prefix} Serviço {nome_servico} não parou como esperado. Status: {status_apos_parada}")
+                    self.append_text_to_log_area_threadsafe(
+                        f"AVISO: Serviço '{nome_servico}' pode não ter parado. Status: {status_apos_parada}\n")
+            elif status_atual == "STOPPED":
+                self.append_text_to_log_area_threadsafe(f"Serviço '{nome_servico}' já estava parado.\n")
+            elif status_atual == "NOT_FOUND":
+                self.append_text_to_log_area_threadsafe(f"ERRO: Serviço '{nome_servico}' não encontrado para parada.\n")
+                return False
+            else:
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: Estado do serviço '{nome_servico}' desconhecido ou erro ({status_atual}). Impossível prosseguir com parada segura.\n")
+                return False
+
+            # Iniciar o serviço
             self.append_text_to_log_area_threadsafe(f"Iniciando serviço '{nome_servico}'...\n")
             subprocess.run(["sc", "start", nome_servico], check=True, startupinfo=startupinfo, timeout=30)
-            time.sleep(start_delay_s)
+            self.append_text_to_log_area_threadsafe(
+                f"Comando de início enviado. Aguardando {start_delay_s}s para estabilizar...\n")
 
-            if self._verificar_status_servico_win(nome_servico) == "RUNNING":
+            wait_start = time.monotonic()
+            while time.monotonic() - wait_start < start_delay_s:
+                if self._stop_event.is_set() or self._scheduler_stop_event.is_set():
+                    logging.info(f"{log_prefix} Operação de serviço interrompida durante delay de início.")
+                    return False
+                time.sleep(0.1)
+
+            status_final = self._verificar_status_servico_win(nome_servico)
+            if status_final == "RUNNING":
+                logging.info(f"{log_prefix} Serviço {nome_servico} iniciado com sucesso.")
                 return True
+            else:
+                logging.error(f"{log_prefix} Serviço {nome_servico} falhou ao iniciar. Status: {status_final}")
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: Serviço '{nome_servico}' falhou ao iniciar. Status: {status_final}\n")
+                return False
+
+        except subprocess.CalledProcessError as e_sc:
+            err_output = "N/A"
+            if e_sc.stderr:
+                try:
+                    err_output = e_sc.stderr.decode('latin-1', errors='replace')
+                except:
+                    pass
+            elif e_sc.stdout:
+                try:
+                    err_output = e_sc.stdout.decode('latin-1', errors='replace')
+                except:
+                    pass
+            err_msg = f"Erro 'sc' para '{nome_servico}': {err_output.strip()}"
+            self.append_text_to_log_area_threadsafe(f"ERRO: {err_msg}\n")
+            logging.error(f"{log_prefix} {err_msg}", exc_info=True)
+            return False
+        except subprocess.TimeoutExpired as e_timeout:
+            self.append_text_to_log_area_threadsafe(f"ERRO: Timeout ao operar serviço '{nome_servico}': {e_timeout}\n")
+            logging.error(f"{log_prefix} Timeout ao operar serviço '{nome_servico}': {e_timeout}", exc_info=True)
+            return False
+        except FileNotFoundError:
+            self.append_text_to_log_area_threadsafe(f"ERRO: Comando 'sc.exe' não encontrado.\n")
+            logging.error(f"{log_prefix} Comando 'sc.exe' não encontrado.")
+            return False
         except Exception as e:
-            logging.error(f"{log_prefix} Erro ao operar serviço: {e}", exc_info=True)
-        return False
+            self.append_text_to_log_area_threadsafe(f"ERRO inesperado ao operar serviço '{nome_servico}': {e}\n")
+            logging.error(f"{log_prefix} Erro inesperado ao operar serviço '{nome_servico}': {e}", exc_info=True)
+            return False
 
     def _operar_servico_com_delays_linux(self, nome_servico, tipo_reinicio=""):
         stop_delay_s = self.stop_delay_var.get()
@@ -828,37 +1031,108 @@ class ServidorTab(ttk.Frame):
         if not nome_servico.endswith(".service"):
             nome_servico_systemd = f"{nome_servico}.service"
 
-        try:
-            self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico_systemd}'...\n")
-            subprocess.run(['sudo', 'systemctl', 'stop', nome_servico_systemd], check=True, capture_output=True,
-                           timeout=30)
-            time.sleep(stop_delay_s)
-            self.append_text_to_log_area_threadsafe(f"Iniciando serviço '{nome_servico_systemd}'...\n")
-            subprocess.run(['sudo', 'systemctl', 'start', nome_servico_systemd], check=True, capture_output=True,
-                           timeout=30)
-            time.sleep(start_delay_s)
+        cmd_prefix = []
+        if os.geteuid() != 0:  # Adiciona sudo apenas se não for root
+            cmd_prefix = ['sudo']
 
-            if self._verificar_status_servico_linux(nome_servico_systemd) == "RUNNING":
+        try:
+            # Parar o serviço
+            status_atual = self._verificar_status_servico_linux(nome_servico_systemd)
+            if status_atual == "RUNNING" or status_atual == "START_PENDING":
+                self.append_text_to_log_area_threadsafe(f"Parando serviço '{nome_servico_systemd}'...\n")
+                subprocess.run(cmd_prefix + ['systemctl', 'stop', nome_servico_systemd], check=True,
+                               capture_output=True, text=True, timeout=30)
+                self.append_text_to_log_area_threadsafe(f"Comando de parada enviado. Aguardando {stop_delay_s}s...\n")
+
+                wait_start = time.monotonic()
+                while time.monotonic() - wait_start < stop_delay_s:
+                    if self._stop_event.is_set() or self._scheduler_stop_event.is_set():
+                        logging.info(f"{log_prefix} Operação de serviço interrompida durante delay de parada.")
+                        return False
+                    time.sleep(0.1)
+
+                status_apos_parada = self._verificar_status_servico_linux(nome_servico_systemd)
+                if status_apos_parada != "STOPPED":
+                    logging.warning(
+                        f"{log_prefix} Serviço {nome_servico_systemd} não parou como esperado. Status: {status_apos_parada}")
+                    self.append_text_to_log_area_threadsafe(
+                        f"AVISO: Serviço '{nome_servico_systemd}' pode não ter parado. Status: {status_apos_parada}\n")
+            elif status_atual == "STOPPED":
+                self.append_text_to_log_area_threadsafe(f"Serviço '{nome_servico_systemd}' já estava parado.\n")
+            elif status_atual == "NOT_FOUND":
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: Serviço '{nome_servico_systemd}' não encontrado para parada.\n")
+                return False
+            else:
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: Estado do serviço '{nome_servico_systemd}' desconhecido ou erro ({status_atual}). Impossível prosseguir com parada segura.\n")
+                return False
+
+            # Iniciar o serviço
+            self.append_text_to_log_area_threadsafe(f"Iniciando serviço '{nome_servico_systemd}'...\n")
+            subprocess.run(cmd_prefix + ['systemctl', 'start', nome_servico_systemd], check=True, capture_output=True,
+                           text=True, timeout=30)
+            self.append_text_to_log_area_threadsafe(
+                f"Comando de início enviado. Aguardando {start_delay_s}s para estabilizar...\n")
+
+            wait_start = time.monotonic()
+            while time.monotonic() - wait_start < start_delay_s:
+                if self._stop_event.is_set() or self._scheduler_stop_event.is_set():
+                    logging.info(f"{log_prefix} Operação de serviço interrompida durante delay de início.")
+                    return False
+                time.sleep(0.1)
+
+            status_final = self._verificar_status_servico_linux(nome_servico_systemd)
+            if status_final == "RUNNING":
+                logging.info(f"{log_prefix} Serviço {nome_servico_systemd} iniciado com sucesso.")
                 return True
+            else:
+                logging.error(f"{log_prefix} Serviço {nome_servico_systemd} falhou ao iniciar. Status: {status_final}")
+                self.append_text_to_log_area_threadsafe(
+                    f"ERRO: Serviço '{nome_servico_systemd}' falhou ao iniciar. Status: {status_final}\n")
+                return False
+
+        except subprocess.CalledProcessError as e_sysctl:
+            err_output = e_sysctl.stderr.strip() if e_sysctl.stderr else e_sysctl.stdout.strip()
+            err_msg = f"Erro 'systemctl' para '{nome_servico_systemd}': {err_output}"
+            self.append_text_to_log_area_threadsafe(f"ERRO: {err_msg}\n")
+            logging.error(f"{log_prefix} {err_msg}", exc_info=True)
+            return False
+        except subprocess.TimeoutExpired as e_timeout:
+            self.append_text_to_log_area_threadsafe(
+                f"ERRO: Timeout ao operar serviço '{nome_servico_systemd}': {e_timeout}\n")
+            logging.error(f"{log_prefix} Timeout ao operar serviço '{nome_servico_systemd}': {e_timeout}",
+                          exc_info=True)
+            return False
+        except FileNotFoundError:
+            self.append_text_to_log_area_threadsafe(f"ERRO: Comando 'systemctl' ou 'sudo' não encontrado.\n")
+            logging.error(f"{log_prefix} Comando 'systemctl' ou 'sudo' não encontrado.")
+            return False
         except Exception as e:
-            err_output = e.stderr.decode(errors='replace').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
-            logging.error(f"{log_prefix} Erro ao operar serviço: {err_output}", exc_info=True)
-        return False
+            self.append_text_to_log_area_threadsafe(
+                f"ERRO inesperado ao operar serviço '{nome_servico_systemd}': {e}\n")
+            logging.error(f"{log_prefix} Erro inesperado ao operar serviço '{nome_servico_systemd}': {e}",
+                          exc_info=True)
+            return False
 
     def append_text_to_log_area(self, texto):
         if not self.winfo_exists(): return
         try:
             self.app.root.after(0, self._append_text_to_log_area_gui_thread, texto)
-        except Exception:
+        except Exception:  # tk.TclError if root is destroyed
             pass
 
     def _append_text_to_log_area_gui_thread(self, texto):
         if not self.text_area_log.winfo_exists(): return
-        self.text_area_log.config(state='normal')
-        self.text_area_log.insert('end', texto)
-        if self.auto_scroll_log_var.get():
-            self.text_area_log.yview_moveto(1.0)
-        self.text_area_log.config(state='disabled')
+        try:
+            current_state = self.text_area_log.cget("state")
+            self.text_area_log.config(state='normal')
+            self.text_area_log.insert('end', texto)
+            if self.auto_scroll_log_var.get():
+                self.text_area_log.yview_moveto(1.0)
+            self.text_area_log.config(state=current_state)  # Restore original state
+        except tk.TclError:  # Widget might be destroyed
+            pass
 
     def append_text_to_log_area_threadsafe(self, texto):
         self.append_text_to_log_area(texto)
@@ -875,43 +1149,79 @@ class ServidorTab(ttk.Frame):
         self.pausar_btn.config(text=btn_text, bootstyle=btn_style)
 
     def _toggle_log_search_bar(self, event=None, force_show=False, force_hide=False):
+        # Garante que o frame existe antes de operar sobre ele
+        if not hasattr(self, 'search_log_frame') or not self.search_log_frame.winfo_exists():
+            return
+
         if force_hide or (self.search_log_frame.winfo_ismapped() and not force_show):
             self.search_log_frame.pack_forget()
-            self.text_area_log.tag_remove("search_match", "1.0", "end")
-        else:
+            if self.text_area_log.winfo_exists():
+                self.text_area_log.tag_remove("search_match", "1.0", "end")
+        elif self.text_area_log.winfo_exists():  # Só mostra se a área de log existir
             self.search_log_frame.pack(fill='x', before=self.text_area_log, pady=(0, 2), padx=5)
-            self.log_search_entry.focus_set()
+            if self.log_search_entry.winfo_exists():
+                self.log_search_entry.focus_set()
 
     def _perform_log_search_internal(self, term, start_pos, direction_forward=True, wrap=True):
-        if not term: return None
+        if not term or not self.text_area_log.winfo_exists(): return None
+
+        original_state = self.text_area_log.cget("state")
+        self.text_area_log.config(state="normal")
         self.text_area_log.tag_remove("search_match", "1.0", "end")
         count_var = tk.IntVar()
-        pos = self.text_area_log.search(term, start_pos, backwards=(not direction_forward), count=count_var,
-                                        nocase=True)
+
+        pos = self.text_area_log.search(
+            term,
+            start_pos,
+            backwards=(not direction_forward),
+            count=count_var,
+            nocase=True,
+            stopindex="1.0" if not direction_forward else "end"  # Evita que a busca continue indefinidamente
+        )
+
         if pos:
             end_pos = f"{pos}+{count_var.get()}c"
             self.text_area_log.tag_add("search_match", pos, end_pos)
             self.text_area_log.tag_config("search_match", background="yellow", foreground="black")
             self.text_area_log.see(pos)
+            self.text_area_log.config(state=original_state)
             return end_pos if direction_forward else pos
         elif wrap:
+            # Se não encontrou e wrap é True, tenta do início/fim oposto
             wrap_start = "1.0" if direction_forward else "end"
+            # Chama recursivamente com wrap=False para evitar loop infinito
             return self._perform_log_search_internal(term, wrap_start, direction_forward, wrap=False)
+
+        self.text_area_log.config(state=original_state)
         return None
 
     def _search_log_next(self, event=None):
+        term = self.log_search_var.get()
+        if not term or not self.text_area_log.winfo_exists(): return
+
         start_from = self.last_search_pos
-        current_match = self.text_area_log.tag_ranges("search_match")
-        if current_match: start_from = current_match[1]
-        next_pos = self._perform_log_search_internal(self.log_search_var.get(), start_from)
-        if next_pos: self.last_search_pos = next_pos
+        current_match_ranges = self.text_area_log.tag_ranges("search_match")
+        if current_match_ranges:  # Se existe uma correspondência atual, começa depois dela
+            start_from = current_match_ranges[1]
+
+        next_match_end_pos = self._perform_log_search_internal(term, start_from, direction_forward=True, wrap=True)
+        if next_match_end_pos:
+            self.last_search_pos = next_match_end_pos
+        # else: self.last_search_pos = "1.0" # Ou manter o último se nada for encontrado
 
     def _search_log_prev(self, event=None):
+        term = self.log_search_var.get()
+        if not term or not self.text_area_log.winfo_exists(): return
+
         start_from = self.last_search_pos
-        current_match = self.text_area_log.tag_ranges("search_match")
-        if current_match: start_from = current_match[0]
-        next_pos = self._perform_log_search_internal(self.log_search_var.get(), start_from, direction_forward=False)
-        if next_pos: self.last_search_pos = next_pos
+        current_match_ranges = self.text_area_log.tag_ranges("search_match")
+        if current_match_ranges:  # Se existe uma correspondência atual, começa antes dela
+            start_from = current_match_ranges[0]
+
+        prev_match_start_pos = self._perform_log_search_internal(term, start_from, direction_forward=False, wrap=True)
+        if prev_match_start_pos:
+            self.last_search_pos = prev_match_start_pos
+        # else: self.last_search_pos = "end"
 
 
 # ==============================================================================
@@ -935,8 +1245,9 @@ class ServerRestarterApp:
         try:
             self.style.theme_use(self.config.get("theme", "darkly"))
         except tk.TclError:
-            self.style.theme_use("litera")
+            self.style.theme_use("litera")  # Fallback theme
             self.config["theme"] = "litera"
+            logging.warning(f"Tema '{self.config.get('theme')}' não encontrado. Usando 'litera'.")
 
         self.servidores = []
         self.config_changed = False
@@ -956,10 +1267,11 @@ class ServerRestarterApp:
         self.inicializar_servidores_das_configuracoes()
 
         self.main_notebook.pack(fill='both', expand=True, padx=5, pady=5)
-        if self.bg_label:
+        if self.bg_label and self.bg_label.winfo_exists():  # Check if bg_label exists
             self.bg_label.lower()
 
-        self.atualizar_log_sistema_periodicamente()
+        self._system_log_update_error_count = 0
+        self.atualizar_log_sistema_periodicamente()  # Corrigido: Chamada de método da classe
         self.root.bind("<Configure>", self._on_root_configure)
         self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray_on_close)
 
@@ -969,43 +1281,77 @@ class ServerRestarterApp:
     def _setup_background_image(self):
         if not PIL_AVAILABLE or not os.path.exists(BACKGROUND_IMAGE_PATH): return
         try:
-            self.original_pil_bg_image = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
+            pil_image_original = Image.open(BACKGROUND_IMAGE_PATH)
+            pil_image_rgba = pil_image_original.convert("RGBA")
+            self.original_pil_bg_image = pil_image_rgba  # Armazena para redimensionamento
+
             self.bg_label = ttk.Label(self.root)
             self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
-            self.root.update_idletasks()
+            self.root.update_idletasks()  # Garante que a janela tem dimensões
             self._resize_background_image(self.root.winfo_width(), self.root.winfo_height())
         except Exception as e:
             logging.error(f"Erro ao carregar imagem de fundo: {e}", exc_info=True)
             self.original_pil_bg_image = None
-            if self.bg_label: self.bg_label.destroy()
+            if self.bg_label and self.bg_label.winfo_exists(): self.bg_label.destroy()
             self.bg_label = None
 
     def _on_root_configure(self, event):
-        if event.widget == self.root and self.original_pil_bg_image:
+        if event.widget == self.root and self.original_pil_bg_image and self.bg_label and self.bg_label.winfo_exists():
             self._resize_background_image(event.width, event.height)
 
     def _resize_background_image(self, width, height):
-        if not self.original_pil_bg_image or width <= 1 or height <= 1: return
-        img_copy = self.original_pil_bg_image.copy()
+        if not self.original_pil_bg_image or width <= 1 or height <= 1 or \
+                not self.bg_label or not self.bg_label.winfo_exists():
+            return
 
-        if BACKGROUND_ALPHA_MULTIPLIER < 1.0:
-            alpha = img_copy.split()[3]
-            alpha = alpha.point(lambda p: int(p * BACKGROUND_ALPHA_MULTIPLIER))
-            img_copy.putalpha(alpha)
+        img_to_resize = self.original_pil_bg_image.copy()  # Trabalha com uma cópia
 
-        img_aspect = img_copy.width / img_copy.height
+        if BACKGROUND_ALPHA_MULTIPLIER < 1.0 and BACKGROUND_ALPHA_MULTIPLIER >= 0.0:
+            try:
+                alpha = img_to_resize.split()[3]
+                alpha = alpha.point(lambda p: int(p * BACKGROUND_ALPHA_MULTIPLIER))
+                img_to_resize.putalpha(alpha)
+            except IndexError:  # Sem canal alfa
+                pass
+            except Exception as e_alpha:
+                logging.warning(f"Não foi possível aplicar alfa à imagem de fundo: {e_alpha}")
+
+        # Calcular proporções para "cobrir" a área
+        img_aspect = img_to_resize.width / img_to_resize.height
         win_aspect = width / height
 
         if win_aspect > img_aspect:
-            new_width = width
-            new_height = int(new_width / img_aspect)
-        else:
+            # Janela mais larga que a imagem: altura da imagem = altura da janela, largura proporcional
             new_height = height
             new_width = int(new_height * img_aspect)
+        else:
+            # Janela mais alta ou mesma proporção: largura da imagem = largura da janela, altura proporcional
+            new_width = width
+            new_height = int(new_width / img_aspect)
 
-        resized = img_copy.resize((new_width, new_height), Image.LANCZOS)
-        self.bg_photo_image = ImageTk.PhotoImage(resized)
-        self.bg_label.configure(image=self.bg_photo_image)
+        # Para "cobrir", pode ser que a imagem precise ser maior que a janela em uma dimensão
+        # e depois cortada. Ou, podemos escalar para que uma dimensão bata e a outra seja >=
+        # e então centralizar.
+        # Ajuste para 'cover': escalar para que a menor dimensão da imagem caiba
+        # e a maior exceda ou caiba, depois cortar o excesso do centro.
+
+        # Escala para que a imagem CUBRA a janela
+        if width / img_to_resize.width > height / img_to_resize.height:
+            # Escalar pela largura da janela, a imagem é proporcionalmente mais alta
+            final_w = width
+            final_h = int(img_to_resize.height * (width / img_to_resize.width))
+        else:
+            # Escalar pela altura da janela, a imagem é proporcionalmente mais larga
+            final_h = height
+            final_w = int(img_to_resize.width * (height / img_to_resize.height))
+
+        try:
+            resized_pil_image = img_to_resize.resize((final_w, final_h), Image.LANCZOS)
+            self.bg_photo_image = ImageTk.PhotoImage(resized_pil_image)
+            self.bg_label.configure(image=self.bg_photo_image)
+            # self.bg_label.image = self.bg_photo_image # Manter referência, ttk.Label deve fazer isso
+        except Exception as e_resize:
+            logging.error(f"Erro ao redimensionar ou aplicar imagem de fundo: {e_resize}", exc_info=True)
 
     def set_application_icon(self):
         if PIL_AVAILABLE and os.path.exists(ICON_PATH):
@@ -1013,7 +1359,8 @@ class ServerRestarterApp:
                 if platform.system() == "Windows":
                     self.root.iconbitmap(default=ICON_PATH)
                 else:
-                    self.app_icon_tk = ImageTk.PhotoImage(Image.open(ICON_PATH))
+                    pil_icon = Image.open(ICON_PATH)
+                    self.app_icon_tk = ImageTk.PhotoImage(pil_icon)
                     self.root.iconphoto(True, self.app_icon_tk)
             except Exception as e:
                 logging.error(f"Erro ao definir ícone da aplicação: {e}", exc_info=True)
@@ -1022,34 +1369,63 @@ class ServerRestarterApp:
         if PIL_AVAILABLE and os.path.exists(ICON_PATH):
             try:
                 return Image.open(ICON_PATH)
-            except Exception:
-                pass
+            except Exception as e_load_icon:
+                logging.warning(
+                    f"Não foi possível carregar ícone da bandeja de {ICON_PATH}: {e_load_icon}. Usando padrão.")
+                pass  # Tenta o padrão abaixo
 
-        if PIL_AVAILABLE:
-            image = Image.new('RGB', (64, 64), 'skyblue')
-            draw = ImageDraw.Draw(image)
-            draw.rectangle((0, 0, 64, 64), fill='skyblue')
-            return image
+        if PIL_AVAILABLE:  # Se o ícone falhou ou não existia, mas PIL sim, desenha um
+            try:
+                image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))  # Transparente
+                draw = ImageDraw.Draw(image)
+                # Exemplo simples: um círculo azul
+                draw.ellipse((5, 5, 59, 59), fill='skyblue', outline='blue')
+                draw.text((20, 20), "SR", fill="navy", font=None)  # Sem fonte específica para portabilidade
+                return image
+            except Exception as e_draw:
+                logging.error(f"Erro ao desenhar ícone padrão da bandeja: {e_draw}")
         return None
 
     def setup_tray_icon(self):
+        if not PYSTRAY_AVAILABLE:  # Checa se pystray está disponível
+            return
+
         image = self._create_tray_image()
-        if not image: return
-        menu = (pystray.MenuItem('Mostrar', self.show_from_tray, default=True),
-                pystray.MenuItem('Sair', self.shutdown_application_from_tray))
-        self.tray_icon = pystray.Icon("ServerRestarter", image, "PredPy Server Restarter", menu)
-        threading.Thread(target=self.tray_icon.run, daemon=True, name="TrayIconThread").start()
+        if not image:
+            logging.error("Imagem para ícone da bandeja não pôde ser criada.")
+            return
+
+        menu_items = [
+            pystray.MenuItem('Mostrar', self.show_from_tray, default=True),
+            pystray.MenuItem('Sair', self.shutdown_application_from_tray)
+        ]
+
+        try:
+            self.tray_icon = pystray.Icon("ServerRestarter", image, "PredPy Server Restarter", tuple(menu_items))
+            threading.Thread(target=self.tray_icon.run, daemon=True, name="TrayIconThread").start()
+            logging.info("Ícone da bandeja configurado.")
+        except Exception as e_tray:
+            logging.error(f"Erro ao configurar ícone da bandeja: {e_tray}", exc_info=True)
+            self.tray_icon = None
 
     def show_from_tray(self, icon=None, item=None):
-        self.root.after(0, self.root.deiconify)
+        if self.root.winfo_exists():
+            self.root.after(0, self.root.deiconify)  # Traz a janela de volta
+            self.root.after(100, self.root.lift)  # Traz para frente
+            self.root.after(200, self.root.focus_force)  # Força o foco
 
     def minimize_to_tray_on_close(self, event=None):
-        if self.tray_icon and self.tray_icon.visible:
-            self.root.withdraw()
+        # Verifica se o ícone da bandeja foi criado e está visível
+        if self.tray_icon and hasattr(self.tray_icon, 'visible') and self.tray_icon.visible:
+            self.root.withdraw()  # Minimiza para a bandeja
+            logging.info("Aplicação minimizada para a bandeja.")
         else:
+            # Se não há ícone na bandeja ou não está visível, encerra a aplicação
+            logging.info("Ícone da bandeja não disponível/visível. Encerrando aplicação.")
             self.shutdown_application()
 
     def shutdown_application_from_tray(self, icon=None, item=None):
+        logging.info("Comando 'Sair' da bandeja recebido.")
         self.shutdown_application()
 
     def shutdown_application(self):
@@ -1058,12 +1434,27 @@ class ServerRestarterApp:
         for srv_tab in self.servidores:
             srv_tab.stop_log_monitoring(from_tab_closure=True)
             srv_tab.stop_scheduler_thread(from_tab_closure=True)
+
         if self.config_changed:
-            self._save_app_config_to_file()
+            try:
+                self._save_app_config_to_file()
+                logging.info("Configurações salvas automaticamente ao sair.")
+            except Exception as e_save:
+                logging.error(f"Erro ao salvar configurações ao sair: {e_save}", exc_info=True)
+
         if self.tray_icon:
-            self.tray_icon.stop()
+            try:
+                self.tray_icon.stop()
+                logging.info("Ícone da bandeja parado.")
+            except Exception as e_tray_stop:
+                # Pode dar erro se já estiver parando ou se a thread já terminou
+                logging.debug(f"Erro (possivelmente benigno) ao parar ícone da bandeja: {e_tray_stop}")
+
         if self.root.winfo_exists():
-            self.root.destroy()
+            try:
+                self.root.destroy()
+            except tk.TclError:  # Pode acontecer se já estiver sendo destruído
+                pass
         logging.info("Aplicação encerrada.")
 
     def get_current_servidor_tab_widget(self):
@@ -1073,7 +1464,7 @@ class ServerRestarterApp:
             if not selected_tab_id: return None
             widget = self.main_notebook.nametowidget(selected_tab_id)
             if isinstance(widget, ServidorTab): return widget
-        except tk.TclError:
+        except tk.TclError:  # Widget pode não existir mais
             return None
         return None
 
@@ -1082,64 +1473,163 @@ class ServerRestarterApp:
         if not servers_config_list:
             self.adicionar_servidor_tab("Servidor 1 (Padrão)")
         else:
-            for srv_conf in servers_config_list:
-                self.adicionar_servidor_tab(srv_conf.get("nome"), srv_conf, focus_new_tab=False)
-        if self.servidores:
-            self.main_notebook.select(self.servidores[0])
+            for idx, srv_conf in enumerate(servers_config_list):
+                # Garante nome único se o nome do config estiver em branco ou for duplicado
+                nome_base = srv_conf.get("nome", f"Servidor {idx + 1}")
+                self.adicionar_servidor_tab(nome_base, srv_conf, focus_new_tab=False)
+
+        if self.servidores and self.main_notebook.tabs():  # Verifica se há abas antes de selecionar
+            try:
+                self.main_notebook.select(self.servidores[0])
+            except tk.TclError:
+                logging.warning("Não foi possível selecionar a primeira aba de servidor.")
 
     def adicionar_servidor_tab(self, nome_sugerido=None, config_servidor=None, focus_new_tab=True):
-        if nome_sugerido is None: nome_sugerido = f"Servidor {len(self.servidores) + 1}"
-        servidor_tab_frame = ServidorTab(self.main_notebook, self, nome_sugerido, config_servidor)
+        if nome_sugerido is None or not nome_sugerido.strip():
+            nome_sugerido = f"Servidor {len(self.servidores) + 1}"
+
+        # Garante nome único entre as abas
+        final_nome = nome_sugerido
+        count = 1
+        nomes_existentes = [s.nome for s in self.servidores]
+        while final_nome in nomes_existentes:
+            final_nome = f"{nome_sugerido} ({count})"
+            count += 1
+
+        servidor_tab_frame = ServidorTab(self.main_notebook, self, final_nome, config_servidor)
         self.servidores.append(servidor_tab_frame)
-        self.main_notebook.add(servidor_tab_frame, text=nome_sugerido)
-        if focus_new_tab: self.main_notebook.select(servidor_tab_frame)
+        self.main_notebook.add(servidor_tab_frame, text=final_nome)
+        if focus_new_tab and self.main_notebook.tabs():
+            try:
+                self.main_notebook.select(servidor_tab_frame)
+            except tk.TclError:
+                logging.warning(f"Não foi possível focar na nova aba '{final_nome}'")
         self.mark_config_changed()
 
     def remover_servidor_atual(self):
         current_tab = self.get_current_servidor_tab_widget()
-        if not current_tab: return
-        if Messagebox.okcancel(f"Remover '{current_tab.nome}'?", f"Tem certeza que deseja remover este servidor?",
-                               parent=self.root) == "OK":
-            current_tab.stop_log_monitoring(True)
-            current_tab.stop_scheduler_thread(True)
-            self.servidores.remove(current_tab)
-            self.main_notebook.forget(current_tab)
-            current_tab.destroy()
+        if not current_tab:
+            self.show_messagebox_from_thread("warning", "Remover Servidor", "Nenhuma aba de servidor selecionada.")
+            return
+
+        nome_servidor = current_tab.nome
+        if Messagebox.okcancel(f"Remover '{nome_servidor}'?",
+                               f"Tem certeza que deseja remover o servidor '{nome_servidor}'?\nEsta ação não pode ser desfeita.",
+                               parent=self.root, alert=True) == "OK":
+            logging.info(f"Removendo aba '{nome_servidor}'...")
+            current_tab.stop_log_monitoring(from_tab_closure=True)
+            current_tab.stop_scheduler_thread(from_tab_closure=True)
+
+            try:
+                self.main_notebook.forget(current_tab)
+            except tk.TclError:
+                logging.warning(
+                    f"TclError ao tentar remover aba '{nome_servidor}' do notebook (pode já ter sido removida).")
+
+            if current_tab in self.servidores:
+                self.servidores.remove(current_tab)
+
+            current_tab.destroy()  # Destroi o frame da aba
             self.mark_config_changed()
+            self.set_status_from_thread(f"Servidor '{nome_servidor}' removido.")
+            logging.info(f"Aba '{nome_servidor}' removida.")
+
+            # Seleciona outra aba se possível
+            if self.servidores:
+                try:
+                    self.main_notebook.select(self.servidores[0])
+                except tk.TclError:
+                    pass  # Ignora se não puder selecionar
+            elif self.main_notebook.tabs() and self.system_log_frame.winfo_exists():  # Se só sobrou o log do sistema
+                try:
+                    self.main_notebook.select(self.system_log_frame)
+                except tk.TclError:
+                    pass
 
     def renomear_servidor_atual(self):
         current_tab = self.get_current_servidor_tab_widget()
-        if not current_tab: return
-        novo_nome = simpledialog.askstring("Renomear", "Novo nome:", initialvalue=current_tab.nome, parent=self.root)
-        if novo_nome and novo_nome.strip() and novo_nome != current_tab.nome:
+        if not current_tab:
+            self.show_messagebox_from_thread("warning", "Renomear Servidor", "Nenhuma aba de servidor selecionada.")
+            return
+
+        nome_antigo = current_tab.nome
+        novo_nome = simpledialog.askstring("Renomear Servidor", f"Novo nome para '{nome_antigo}':",
+                                           initialvalue=nome_antigo, parent=self.root)
+
+        if novo_nome and novo_nome.strip() and novo_nome != nome_antigo:
+            nomes_existentes = [s.nome for s in self.servidores if s != current_tab]
+            if novo_nome in nomes_existentes:
+                self.show_messagebox_from_thread("error", "Nome Duplicado", f"O nome '{novo_nome}' já está em uso.")
+                return
+
             current_tab.nome = novo_nome
-            self.main_notebook.tab(current_tab, text=novo_nome)
-            self.mark_config_changed()
+            try:
+                # Encontra o ID da aba para renomear no notebook
+                for i, tab_id_str in enumerate(self.main_notebook.tabs()):
+                    if self.main_notebook.nametowidget(tab_id_str) == current_tab:
+                        self.main_notebook.tab(tab_id_str, text=novo_nome)
+                        break
+                self.mark_config_changed()
+                self.set_status_from_thread(f"Servidor '{nome_antigo}' renomeado para '{novo_nome}'.")
+                logging.info(f"Servidor '{nome_antigo}' renomeado para '{novo_nome}'.")
+            except tk.TclError as e:
+                logging.error(f"Erro ao renomear aba no notebook: {e}", exc_info=True)
+                self.show_messagebox_from_thread("error", "Erro ao Renomear",
+                                                 "Não foi possível atualizar o nome da aba.")
+                current_tab.nome = nome_antigo  # Reverte a mudança interna
+
+        elif novo_nome is not None and not novo_nome.strip():
+            self.show_messagebox_from_thread("warning", "Nome Inválido", "O nome do servidor não pode ser vazio.")
 
     def mark_config_changed(self):
         if not self.config_changed:
             self.config_changed = True
-            if hasattr(self, 'file_menu'): self.file_menu.entryconfigure("Salvar Configuração", state="normal")
+            if hasattr(self, 'file_menu') and self.file_menu.winfo_exists():  # Checa se o menu existe
+                try:
+                    self.file_menu.entryconfigure("Salvar Configuração", state="normal")
+                except tk.TclError:  # Pode acontecer se o menu for destruído
+                    pass
 
     def _load_app_config_from_file(self):
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {"theme": "darkly", "servers": []}
+                    config_data = json.load(f)
+                    logging.info(f"Configuração carregada de {self.config_file}")
+                    return config_data
+        except json.JSONDecodeError as e_json:
+            logging.error(f"Erro ao decodificar JSON em {self.config_file}: {e_json}", exc_info=True)
+        except Exception as e_load:
+            logging.error(f"Erro ao carregar configuração de {self.config_file}: {e_load}", exc_info=True)
+
+        logging.info(f"Arquivo de configuração {self.config_file} não encontrado ou inválido. Usando padrões.")
+        return {"theme": "litera", "servers": []}  # Default para um tema que deve existir
 
     def _save_app_config_to_file(self):
-        config_data = {"theme": self.style.theme.name, "servers": [s.get_current_config() for s in self.servidores]}
+        # Usa self.style.theme.name para pegar o nome do tema atual de forma segura
+        current_theme_name = "litera"  # Default
+        if hasattr(self.style, 'theme') and hasattr(self.style.theme, 'name'):
+            current_theme_name = self.style.theme.name
+
+        config_data = {"theme": current_theme_name,
+                       "servers": [s.get_current_config() for s in self.servidores]}
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, indent=4)
             self.config_changed = False
-            if hasattr(self, 'file_menu'): self.file_menu.entryconfigure("Salvar Configuração", state="disabled")
+            if hasattr(self, 'file_menu') and self.file_menu.winfo_exists():
+                try:
+                    self.file_menu.entryconfigure("Salvar Configuração", state="disabled")
+                except tk.TclError:
+                    pass
             self.set_status_from_thread("Configuração salva!")
+            logging.info(f"Configuração salva em {self.config_file}")
+        except IOError as e_io:
+            self.show_messagebox_from_thread("error", "Erro ao Salvar", f"Erro de E/S: {e_io}")
+            logging.error(f"Erro de E/S ao salvar configuração: {e_io}", exc_info=True)
         except Exception as e:
-            self.show_messagebox_from_thread("error", "Erro ao Salvar", str(e))
+            self.show_messagebox_from_thread("error", "Erro ao Salvar", f"Erro inesperado: {str(e)}")
+            logging.error(f"Erro inesperado ao salvar configuração: {e}", exc_info=True)
 
     def load_config_from_dialog(self):
         caminho = filedialog.askopenfilename(
@@ -1154,28 +1644,33 @@ class ServerRestarterApp:
                 loaded_config_data = json.load(f)
 
             # Limpar abas existentes
-            for srv_tab in list(self.servidores):
+            for srv_tab in list(self.servidores):  # Itera sobre uma cópia
                 srv_tab.stop_log_monitoring(from_tab_closure=True)
                 srv_tab.stop_scheduler_thread(from_tab_closure=True)
-                self.main_notebook.forget(srv_tab)
+                if self.main_notebook.winfo_exists():  # Verifica se o notebook ainda existe
+                    try:
+                        self.main_notebook.forget(srv_tab)
+                    except tk.TclError:
+                        pass  # Aba pode já ter sido removida
                 srv_tab.destroy()
             self.servidores.clear()
 
             # Carregar nova configuração
-            self.config_file = caminho
+            self.config_file = caminho  # Atualiza o arquivo de configuração padrão
             self.config = loaded_config_data
-            new_theme = self.config.get("theme", "darkly")
+            new_theme = self.config.get("theme", "litera")  # Default para litera
 
             try:
                 self.style.theme_use(new_theme)
-                self.config["theme"] = new_theme
+                self.config["theme"] = new_theme  # Atualiza o tema na config interna
             except tk.TclError:
                 logging.warning(f"Tema '{new_theme}' do arquivo de config não encontrado. Usando 'litera'.")
                 self.style.theme_use("litera")
                 self.config["theme"] = "litera"
+                self.theme_var.set("litera")  # Atualiza a variável do menu de temas
 
             self.inicializar_servidores_das_configuracoes()
-            self.config_changed = False  # Acabou de carregar, então não há mudanças
+            self.config_changed = False
             if hasattr(self, 'file_menu') and self.file_menu.winfo_exists():
                 try:
                     self.file_menu.entryconfigure("Salvar Configuração", state="disabled")
@@ -1217,7 +1712,13 @@ class ServerRestarterApp:
 
         theme_menu = ttk.Menu(tools_menu, tearoff=0)
         tools_menu.add_cascade(label="Mudar Tema", menu=theme_menu)
-        self.theme_var = tk.StringVar(value=self.style.theme_use())
+
+        # Garante que self.style.theme.name está acessível antes de usá-lo
+        current_theme_name = "litera"  # Default
+        if hasattr(self.style, 'theme') and hasattr(self.style.theme, 'name'):
+            current_theme_name = self.style.theme.name
+        self.theme_var = tk.StringVar(value=current_theme_name)
+
         for theme_name in sorted(self.style.theme_names()):
             theme_menu.add_radiobutton(label=theme_name, variable=self.theme_var, command=self.trocar_tema)
 
@@ -1231,62 +1732,92 @@ class ServerRestarterApp:
             self.style.theme_use(novo_tema)
             # Re-inicializa abas para que elas peguem as novas cores do tema, se necessário
             for srv_tab in self.servidores:
-                srv_tab.initialize_from_config_vars()
+                if srv_tab.winfo_exists():  # Verifica se a aba ainda existe
+                    srv_tab.initialize_from_config_vars()
             self.config["theme"] = novo_tema
             self.mark_config_changed()
             logging.info(f"Tema alterado para: {novo_tema}")
             self.set_status_from_thread(f"Tema alterado para '{novo_tema}'.")
         except tk.TclError as e:
             logging.error(f"Erro ao trocar para o tema '{novo_tema}': {e}", exc_info=True)
-            self.show_messagebox_from_thread("error", "Erro de Tema", f"Não foi possível aplicar o tema '{novo_tema}'.")
+            self.show_messagebox_from_thread("error", "Erro de Tema",
+                                             f"Não foi possível aplicar o tema '{novo_tema}'.\nVoltando para 'litera'.")
+            try:  # Tenta voltar para um tema seguro
+                self.style.theme_use("litera")
+                self.theme_var.set("litera")
+                self.config["theme"] = "litera"
+                for srv_tab in self.servidores:
+                    if srv_tab.winfo_exists(): srv_tab.initialize_from_config_vars()
+            except Exception as e_fallback:
+                logging.critical(f"Falha ao voltar para o tema de fallback 'litera': {e_fallback}")
 
     def export_current_tab_logs(self):
         current_tab_widget = self.get_current_servidor_tab_widget()
-        if not current_tab_widget:
-            if self.main_notebook.index("current") != -1 and \
-                    self.main_notebook.tab(self.main_notebook.select(), "text").startswith("Log do Sistema"):
-                self._export_text_widget_content(self.system_log_text_area, "Log do Sistema do Restarter")
-            else:
-                self.show_messagebox_from_thread("info", "Exportar Logs",
-                                                 "Selecione uma aba de servidor ou Log do Sistema.")
-            return
-        self._export_text_widget_content(current_tab_widget.text_area_log, f"Logs de '{current_tab_widget.nome}'")
+        text_widget_to_export = None
+        filename_part = ""
+
+        if current_tab_widget:
+            text_widget_to_export = current_tab_widget.text_area_log
+            filename_part = f"Logs de '{current_tab_widget.nome}'"
+        elif self.main_notebook.winfo_exists() and self.main_notebook.tabs():
+            try:
+                # Verifica se a aba de Log do Sistema está selecionada
+                current_tab_text = self.main_notebook.tab(self.main_notebook.select(), "text")
+                if current_tab_text == "Log do Sistema":  # Compara com o texto exato da aba
+                    text_widget_to_export = self.system_log_text_area
+                    filename_part = "Log do Sistema do Restarter"
+            except tk.TclError:  # Pode acontecer se nenhuma aba estiver selecionada
+                pass
+
+        if text_widget_to_export and text_widget_to_export.winfo_exists():
+            self._export_text_widget_content(text_widget_to_export, filename_part)
+        else:
+            self.show_messagebox_from_thread("info", "Exportar Logs",
+                                             "Selecione uma aba de servidor ou a aba 'Log do Sistema' para exportar.")
 
     def _export_text_widget_content(self, text_widget, default_filename_part):
+        # Sanitiza o nome do arquivo
+        safe_filename_part = re.sub(r'[^\w\s-]', '', default_filename_part).strip().replace(' ', '_')
+        initial_filename = f"{safe_filename_part}.txt" if safe_filename_part else "logs.txt"
+
         caminho_arquivo = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Arquivos de Texto", "*.txt"), ("Todos", "*.*")],
             title=f"Exportar {default_filename_part}",
-            initialfile=f"{default_filename_part.replace(' ', '_')}.txt"
+            initialfile=initial_filename
         )
         if caminho_arquivo:
             try:
                 if text_widget.winfo_exists():
+                    # Salva o estado, habilita, pega o texto, restaura o estado
+                    original_state = text_widget.cget("state")
+                    text_widget.config(state="normal")
+                    content = text_widget.get('1.0', 'end-1c')  # end-1c para não pegar o newline final
+                    text_widget.config(state=original_state)
+
                     with open(caminho_arquivo, 'w', encoding='utf-8') as f:
-                        f.write(text_widget.get('1.0', 'end-1c'))
+                        f.write(content)
                     self.set_status_from_thread(f"Logs exportados para: {os.path.basename(caminho_arquivo)}")
                     self.show_messagebox_from_thread("info", "Exportação Concluída",
                                                      f"Logs exportados com sucesso para:\n{caminho_arquivo}")
+                    logging.info(f"{default_filename_part} exportados para: {caminho_arquivo}")
             except Exception as e:
                 logging.error(f"Erro ao exportar logs para {caminho_arquivo}: {e}", exc_info=True)
                 self.show_messagebox_from_thread("error", "Erro na Exportação", f"Falha ao exportar logs:\n{e}")
 
     def show_about(self):
-        # Cria uma nova janela (Toplevel) em vez de uma simples caixa de mensagem
         about_win = ttk.Toplevel(self.root)
         about_win.title("Sobre PredPy Server Restarter")
-        about_win.geometry("480x420")  # Tamanho da sua janela personalizada
+        about_win.geometry("480x420")
         about_win.resizable(False, False)
-        about_win.transient(self.root)  # Mantém a janela "Sobre" na frente da principal
-        about_win.grab_set()  # Bloqueia a interação com a janela principal
+        about_win.transient(self.root)
+        about_win.grab_set()
 
-        # Frame principal para organizar o conteúdo
         frame = ttk.Frame(about_win, padding=20)
         frame.pack(fill='both', expand=True)
 
-        # Adiciona os textos e widgets
         ttk.Label(frame, text="PQDT_Raphael Server Restarter", font="-size 16 -weight bold").pack(pady=(0, 10))
-        ttk.Label(frame, text="Versão 1.1.1 (Bug fixes)", font="-size 10").pack()
+        ttk.Label(frame, text="Versão 1.1.2 (Correções e Melhorias)", font="-size 10").pack()  # Versão atualizada
         ttk.Separator(frame).pack(fill='x', pady=10)
 
         desc = ("Ferramenta para monitorar logs de múltiplos servidores,\n"
@@ -1307,119 +1838,354 @@ class ServerRestarterApp:
         ttk.Separator(frame).pack(fill='x', pady=10)
         ttk.Button(frame, text="Fechar", command=about_win.destroy, bootstyle=PRIMARY).pack(pady=(15, 0))
 
-        # Centraliza a janela "Sobre" na tela
         self.root.update_idletasks()
         ws = self.root.winfo_screenwidth()
         hs = self.root.winfo_screenheight()
-        w_about, h_about = 480, 420
+        w_about, h_about = about_win.winfo_reqwidth(), about_win.winfo_reqheight()
+        if w_about <= 1: w_about = 480
+        if h_about <= 1: h_about = 420
         x_pos = (ws / 2) - (w_about / 2)
         y_pos = (hs / 2) - (h_about / 2)
         about_win.geometry(f'{w_about}x{h_about}+{int(x_pos)}+{int(y_pos)}')
 
-        # Espera a janela ser fechada para continuar
         about_win.wait_window()
 
     def create_status_bar(self):
         self.status_bar_frame = ttk.Frame(self.root)
         self.status_bar_frame.pack(side='bottom', fill='x', pady=(0, 2), padx=2)
-        ttk.Separator(self.status_bar_frame).pack(side='top', fill='x')
+        ttk.Separator(self.status_bar_frame, orient=HORIZONTAL).pack(side='top', fill='x')  # Adicionado orient
         self.status_label_var = tk.StringVar(value="Pronto.")
         self.status_label = ttk.Label(self.status_bar_frame, textvariable=self.status_label_var, anchor='w')
-        self.status_label.pack(side='left', fill='x', expand=True, padx=5)
+        self.status_label.pack(side='left', fill='x', expand=True, padx=5, pady=(2, 0))  # Adicionado pady
 
-    def atualizar_log_sistema_periodicamente(self):
-        if self._app_stop_event.is_set(): return
+    def atualizar_log_sistema_periodicamente(self):  # Corrigido: Indentação para ser método da classe
+        if self._app_stop_event.is_set() or not self.root.winfo_exists() or \
+                not hasattr(self, 'system_log_text_area') or not self.system_log_text_area.winfo_exists():
+            return
+
         try:
-            if os.path.exists('server_restarter.log'):
-                with open('server_restarter.log', 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
+            log_file_path = 'server_restarter.log'
+            if os.path.exists(log_file_path):
+                with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    conteudo = f.read()
+
+                self.system_log_text_area.config(state='normal')
+                current_scroll_pos_tuple = self.system_log_text_area.yview()  # Retorna tupla (primeiro, ultimo)
+                current_scroll_pos = current_scroll_pos_tuple[0]
+
+                self.system_log_text_area.delete('1.0', 'end')
+                self.system_log_text_area.insert('end', conteudo)
+
+                if current_scroll_pos >= 0.99:
+                    self.system_log_text_area.yview_moveto(1.0)
+                else:
+                    self.system_log_text_area.yview_moveto(current_scroll_pos)
+
+                self.system_log_text_area.config(state='disabled')
+                self._system_log_update_error_count = 0
+            else:
                 self.system_log_text_area.config(state='normal')
                 self.system_log_text_area.delete('1.0', 'end')
-                self.system_log_text_area.insert('end', content)
-                self.system_log_text_area.yview_moveto(1.0)
+                self.system_log_text_area.insert('end', f"Arquivo de log '{log_file_path}' não encontrado.")
                 self.system_log_text_area.config(state='disabled')
-        except Exception:
-            pass
-        self.root.after(5000, self.atualizar_log_sistema_periodicamente)
+
+        except tk.TclError as e_tcl_syslog:
+            if "invalid command name" not in str(e_tcl_syslog).lower():
+                logging.debug(f"TclError ao atualizar log sistema (provavelmente ao fechar): {e_tcl_syslog}")
+        except Exception as e_syslog_update:
+            if self._system_log_update_error_count < 5:
+                logging.error(f"Erro ao atualizar log sistema: {e_syslog_update}", exc_info=False)
+                self._system_log_update_error_count += 1
+
+        if not self._app_stop_event.is_set() and self.root.winfo_exists():
+            self.root.after(3000, self.atualizar_log_sistema_periodicamente)
 
     def iniciar_selecao_servico_para_aba(self, tab_instance, os_type):
         worker = None
         if os_type == "windows":
+            if not PYWIN32_AVAILABLE:
+                self.show_messagebox_from_thread("error", "Componente Ausente",
+                                                 "pywin32 é necessário para listar serviços do Windows.")
+                return
             worker = self._obter_servicos_worker_win
         elif os_type == "linux":
+            if not SYSTEMCTL_AVAILABLE:
+                self.show_messagebox_from_thread("error", "Componente Ausente",
+                                                 "systemctl é necessário para listar serviços do Linux.")
+                return
             worker = self._obter_servicos_worker_linux
         else:
+            self.show_messagebox_from_thread("error", "Erro Interno", f"Tipo de SO desconhecido: {os_type}")
             return
 
         progress_win, _ = self._show_progress_dialog(f"Carregando Serviços ({os_type.capitalize()})", "Aguarde...")
-        threading.Thread(target=worker, args=(progress_win, tab_instance), daemon=True).start()
+        threading.Thread(target=worker, args=(progress_win, tab_instance), daemon=True,
+                         name=f"ServiceList-{os_type}-{tab_instance.nome}").start()
 
     def _obter_servicos_worker_win(self, progress_win, tab_instance):
+        initialized_com = False
         try:
             pythoncom.CoInitialize()
+            initialized_com = True
             wmi = win32com.client.GetObject('winmgmts:')
-            services = sorted([s.Name for s in wmi.InstancesOf('Win32_Service') if s.AcceptStop])
-            self.root.after(0, self._mostrar_dialogo_selecao_servico, services, progress_win, tab_instance, "Windows")
+            # Filtra serviços que podem ser parados (AcceptStop=True) e têm nome
+            services = sorted([s.Name for s in wmi.InstancesOf('Win32_Service')
+                               if hasattr(s, 'Name') and s.Name and hasattr(s, 'AcceptStop') and s.AcceptStop])
+
+            if self.root.winfo_exists():  # Só chama se a root ainda existir
+                self.root.after(0, self._mostrar_dialogo_selecao_servico, services, progress_win, tab_instance,
+                                "Windows")
+            elif progress_win.winfo_exists():  # Se a root não existe mais, fecha o progresso
+                self.root.after(0, progress_win.destroy)
+
+        except pythoncom.com_error as e_com:
+            logging.error(f"Erro COM ao listar serviços Windows para '{tab_instance.nome}': {e_com}", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro WMI/COM",
+                                                                            f"Erro ao listar serviços: {e_com}"))
         except Exception as e:
-            self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro WMI", str(e)))
+            logging.error(f"Erro ao listar serviços Windows para '{tab_instance.nome}': {e}", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro WMI",
+                                                                            f"Erro ao listar serviços: {str(e)}"))
         finally:
-            if progress_win.winfo_exists(): self.root.after(0, progress_win.destroy)
-            pythoncom.CoUninitialize()
+            if progress_win.winfo_exists() and not self.root.winfo_exists():  # Garante fechar se a root sumiu
+                self.root.after(0, progress_win.destroy)  # Usa after para ser thread-safe
+            elif progress_win.winfo_exists() and self.root.winfo_exists():  # Se ambos existem, fecha via after
+                self.root.after(0, progress_win.destroy)
+
+            if initialized_com:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass  # Ignora erros na desinicialização
 
     def _obter_servicos_worker_linux(self, progress_win, tab_instance):
         try:
-            cmd = ['systemctl', 'list-units', '--type=service', '--all', '--no-legend', '--no-pager']
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
-            services = sorted([line.split()[0] for line in result.stdout.strip().split('\n') if line])
-            self.root.after(0, self._mostrar_dialogo_selecao_servico, services, progress_win, tab_instance, "Linux")
-        except Exception as e:
-            self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro systemctl", str(e)))
-        finally:
-            if progress_win.winfo_exists(): self.root.after(0, progress_win.destroy)
+            cmd_prefix = []
+            if os.geteuid() != 0:  # Adiciona sudo apenas se não for root
+                cmd_prefix = ['sudo']
+            cmd = cmd_prefix + ['systemctl', 'list-units', '--type=service', '--all', '--no-legend', '--no-pager']
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)  # Aumentado timeout
+            services = sorted([line.split()[0] for line in result.stdout.strip().split('\n')
+                               if line and not line.startswith("@")])  # Ignora templates
+            # Filtra para remover a extensão .service para consistência, se presente
+            services_cleaned = []
+            for s in services:
+                if s.endswith(".service"):
+                    services_cleaned.append(s[:-len(".service")])
+                else:
+                    services_cleaned.append(s)
+            services = sorted(list(set(services_cleaned)))  # Remove duplicatas e ordena
 
-    def _mostrar_dialogo_selecao_servico(self, service_list, progress_win, tab_instance, os_type):
-        if progress_win.winfo_exists(): progress_win.destroy()
+            if self.root.winfo_exists():
+                self.root.after(0, self._mostrar_dialogo_selecao_servico, services, progress_win, tab_instance, "Linux")
+            elif progress_win.winfo_exists():
+                self.root.after(0, progress_win.destroy)
+
+        except subprocess.CalledProcessError as e_cmd:
+            err_msg = e_cmd.stderr.strip() if e_cmd.stderr else e_cmd.stdout.strip()
+            logging.error(f"Erro systemctl (CalledProcessError) para '{tab_instance.nome}': {err_msg}", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro systemctl",
+                                                                            f"Falha ao listar serviços:\n{err_msg}"))
+        except subprocess.TimeoutExpired:
+            logging.error(f"Timeout ao listar serviços systemctl para '{tab_instance.nome}'.", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro systemctl",
+                                                                            "Timeout ao listar serviços."))
+        except FileNotFoundError:
+            logging.error(f"Comando systemctl ou sudo não encontrado para '{tab_instance.nome}'.", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro systemctl",
+                                                                            "Comando systemctl ou sudo não encontrado."))
+        except Exception as e:
+            logging.error(f"Erro ao listar serviços Linux para '{tab_instance.nome}': {e}", exc_info=True)
+            if self.root.winfo_exists():
+                self.root.after(0, lambda: self.show_messagebox_from_thread("error", "Erro systemctl",
+                                                                            f"Erro inesperado ao listar serviços:\n{str(e)}"))
+        finally:
+            if progress_win.winfo_exists() and not self.root.winfo_exists():
+                self.root.after(0, progress_win.destroy)
+            elif progress_win.winfo_exists() and self.root.winfo_exists():
+                self.root.after(0, progress_win.destroy)
+
+    def _mostrar_dialogo_selecao_servico(self, service_list, progress_win, tab_instance,
+                                         os_type):  # Corrigido: Indentação
+        if progress_win and progress_win.winfo_exists():
+            try:
+                progress_win.destroy()
+            except Exception:
+                pass
+
         if not service_list:
-            self.show_messagebox_from_thread("info", "Nenhum Serviço", "Nenhum serviço gerenciável encontrado.")
+            self.show_messagebox_from_thread("info", "Nenhum Serviço",
+                                             f"Nenhum serviço gerenciável encontrado para {os_type}.")
             return
 
         dialog = ttk.Toplevel(self.root)
-        dialog.title(f"Selecionar Serviço ({os_type})")
-        dialog.geometry("500x400")
-        dialog.transient(self.root);
+        dialog.title(f"Selecionar Serviço para '{tab_instance.nome}' ({os_type})")
+        dialog.geometry("500x450")
+        dialog.transient(self.root)
         dialog.grab_set()
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
 
-        listbox = tk.Listbox(dialog)
-        listbox.pack(fill='both', expand=True, padx=10, pady=5)
-        for service in service_list: listbox.insert(tk.END, service)
+        ttk.Label(dialog, text=f"Escolha o serviço para '{tab_instance.nome}':", font="-size 10").pack(pady=(10, 5))
+
+        search_frame = ttk.Frame(dialog)
+        search_frame.pack(fill='x', padx=10, pady=(0, 5))
+        ttk.Label(search_frame, text="Buscar:").pack(side='left')
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=search_var)
+        search_entry.pack(side='left', fill='x', expand=True, padx=5)
+
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        scrollbar_y = ttk.Scrollbar(list_frame, orient=VERTICAL)
+        scrollbar_y.pack(side='right', fill='y')
+        scrollbar_x = ttk.Scrollbar(list_frame, orient=HORIZONTAL)
+        scrollbar_x.pack(side='bottom', fill='x')
+
+        treeview = ttk.Treeview(list_frame, columns=("name",), show="headings", selectmode="browse",
+                                yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        treeview.heading("name", text="Nome do Serviço")
+        treeview.column("name", width=450, stretch=tk.YES)
+        treeview.pack(side='left', fill='both', expand=True)
+
+        scrollbar_y.config(command=treeview.yview)
+        scrollbar_x.config(command=treeview.xview)
+
+        initial_selection_name = tab_instance.nome_servico.get()
+
+        def _populate_treeview(query=""):
+            for i in treeview.get_children():
+                treeview.delete(i)
+
+            filter_query = query.lower().strip()
+            item_to_select_id = None
+
+            for name in service_list:
+                if name and (not filter_query or filter_query in name.lower()):
+                    item_id = treeview.insert("", "end", values=(name,))
+                    if name == initial_selection_name and not query:
+                        item_to_select_id = item_id
+
+            if item_to_select_id:
+                treeview.selection_set(item_to_select_id)
+                treeview.see(item_to_select_id)
+            elif treeview.get_children():
+                first_item = treeview.get_children()[0]
+                treeview.selection_set(first_item)
+                treeview.see(first_item)
 
         def on_confirm():
-            selection = listbox.curselection()
+            selection = treeview.selection()
             if selection:
-                tab_instance.set_selected_service(listbox.get(selection[0]))
-                dialog.destroy()
+                selected_item_id = selection[0]
+                selected_item_values = treeview.item(selected_item_id, "values")
+                if selected_item_values:
+                    tab_instance.set_selected_service(selected_item_values[0])
+                    dialog.destroy()
+                else:
+                    if dialog.winfo_exists(): Messagebox.show_warning("Falha ao obter nome do serviço.", parent=dialog)
+            else:
+                if dialog.winfo_exists(): Messagebox.show_warning("Nenhum serviço selecionado.", parent=dialog)
 
-        ttk.Button(dialog, text="Confirmar", command=on_confirm, bootstyle=SUCCESS).pack(pady=5)
+        search_entry.bind("<KeyRelease>", lambda e: _populate_treeview(search_var.get()))
+        treeview.bind("<Double-1>", lambda e: on_confirm())
+
+        _populate_treeview()
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Confirmar", command=on_confirm, bootstyle=SUCCESS).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy, bootstyle=DANGER).pack(side='left', padx=5)
+
+        self.root.update_idletasks()
+        ws, hs = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w_dialog, h_dialog = dialog.winfo_reqwidth(), dialog.winfo_reqheight()
+        if w_dialog <= 1: w_dialog = 500
+        if h_dialog <= 1: h_dialog = 450
+        x_pos = (ws / 2) - (w_dialog / 2)
+        y_pos = (hs / 2) - (h_dialog / 2)
+        dialog.geometry(f'{w_dialog}x{h_dialog}+{int(x_pos)}+{int(y_pos)}')
+
+        search_entry.focus_set()
         dialog.wait_window()
 
     def _show_progress_dialog(self, title, message):
         progress_win = ttk.Toplevel(self.root)
-        progress_win.title(title);
-        progress_win.geometry("300x100");
-        progress_win.transient(self.root);
-        progress_win.grab_set()
-        ttk.Label(progress_win, text=message).pack(pady=10)
-        pb = ttk.Progressbar(progress_win, mode='indeterminate', length=280);
-        pb.pack();
-        pb.start()
+        progress_win.title(str(title) if title else "Progresso")
+        progress_win.geometry("300x100")
+        progress_win.resizable(False, False)
+        progress_win.transient(self.root)
+        progress_win.grab_set()  # Torna a janela modal
+        progress_win.protocol("WM_DELETE_WINDOW", lambda: None)  # Impede fechar pelo X
+
+        ttk.Label(progress_win, text=str(message) if message else "Carregando...", bootstyle=PRIMARY).pack(pady=10,
+                                                                                                           padx=10,
+                                                                                                           fill='x')
+        pb = ttk.Progressbar(progress_win, mode='indeterminate', length=280)
+        pb.pack(pady=10, padx=10)
+        pb.start(10)  # Intervalo em ms
+
+        # Centralizar
+        progress_win.update_idletasks()  # Atualiza para obter dimensões corretas
+        try:
+            root_x = self.root.winfo_x()
+            root_y = self.root.winfo_y()
+            root_width = self.root.winfo_width()
+            root_height = self.root.winfo_height()
+
+            win_width = progress_win.winfo_width()
+            win_height = progress_win.winfo_height()
+
+            if win_width <= 1: win_width = 300  # Fallback
+            if win_height <= 1: win_height = 100  # Fallback
+
+            x_pos = root_x + (root_width // 2) - (win_width // 2)
+            y_pos = root_y + (root_height // 2) - (win_height // 2)
+
+            # Garante que a janela de progresso não saia da tela
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            if x_pos + win_width > screen_width: x_pos = screen_width - win_width
+            if y_pos + win_height > screen_height: y_pos = screen_height - win_height
+            if x_pos < 0: x_pos = 0
+            if y_pos < 0: y_pos = 0
+
+            progress_win.geometry(f'{win_width}x{win_height}+{int(x_pos)}+{int(y_pos)}')
+        except tk.TclError:  # Pode acontecer se a janela root estiver fechando
+            logging.warning("TclError ao centralizar _show_progress_dialog.")
+            try:  # Tenta centralizar na tela como fallback
+                x_pos = (self.root.winfo_screenwidth() // 2) - (progress_win.winfo_reqwidth() // 2)
+                y_pos = (self.root.winfo_screenheight() // 2) - (progress_win.winfo_reqheight() // 2)
+                progress_win.geometry(f'+{int(x_pos)}+{int(y_pos)}')
+            except Exception:
+                pass  # Ignora se nem isso funcionar
+
         return progress_win, pb
 
     def set_status_from_thread(self, message):
-        if self.root.winfo_exists(): self.root.after(0, lambda: self.status_label_var.set(str(message)))
+        if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'status_label_var'):
+            self.root.after(0, lambda: self.status_label_var.set(str(message)[:250]))  # Limita tamanho da msg
 
     def show_messagebox_from_thread(self, boxtype, title, message):
-        if self.root.winfo_exists():
-            self.root.after(0, lambda: getattr(Messagebox, f'show_{boxtype}')(message, title, parent=self.root))
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            parent_to_use = self.root
+            # Tenta usar a janela ativa se for um Toplevel (diálogo) sobre a root
+            try:
+                active_window = self.root.focus_get()
+                if isinstance(active_window, tk.Toplevel) and active_window.winfo_exists():
+                    # Verifica se o Toplevel é filho da root ou um progresso/about
+                    if active_window.master == self.root or active_window.transient() == self.root:
+                        parent_to_use = active_window
+            except Exception:  # Caso focus_get() falhe ou retorne None
+                pass
+
+            self.root.after(0, lambda bt=boxtype, t=title, m=message, p=parent_to_use:
+            getattr(Messagebox, f'show_{bt}')(m, t, parent=p if p.winfo_exists() else self.root))
 
 
 # ==============================================================================
@@ -1427,18 +2193,24 @@ class ServerRestarterApp:
 # ==============================================================================
 def main():
     root_window = ttk.Window()
-    app = ServerRestarterApp(root_window)
+    app = None  # Inicializa app como None
     try:
+        app = ServerRestarterApp(root_window)
         root_window.mainloop()
     except KeyboardInterrupt:
         logging.info("Interrupção por teclado. Encerrando...")
+    except Exception as e_main:
+        logging.critical(f"Erro fatal no loop principal: {e_main}", exc_info=True)
     finally:
-        if 'app' in locals() and app:
+        if app:  # Verifica se app foi instanciado
             app.shutdown_application()
+        elif root_window.winfo_exists():  # Se app falhou no init mas root existe
+            root_window.destroy()
+        logging.info("Aplicação finalizada (bloco finally do main).")
 
 
 def handle_unhandled_thread_exception(args):
-    thread_name = args.thread.name if hasattr(args.thread, 'thread') else 'ThreadDesconhecida'
+    thread_name = args.thread.name if hasattr(args, 'thread') and hasattr(args.thread, 'name') else 'ThreadDesconhecida'
     logging.critical(f"EXCEÇÃO NÃO TRATADA NA THREAD '{thread_name}':",
                      exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
 
@@ -1446,8 +2218,50 @@ def handle_unhandled_thread_exception(args):
 if __name__ == '__main__':
     threading.excepthook = handle_unhandled_thread_exception
 
+    if platform.system() == "Linux" and SYSTEMCTL_AVAILABLE:
+        try:
+            if os.geteuid() != 0:
+                # Tenta elevar privilégios com pkexec para GUI
+                # Isso é mais complexo e pode não funcionar em todos os ambientes.
+                # A abordagem mais simples é instruir o usuário.
+                print("INFO: Tentando elevar privilégios com pkexec (se disponível)...")
+                logging.info("Tentando elevar privilégios com pkexec para GUI no Linux.")
+                # Constrói o comando para pkexec
+                # sys.executable é o interpretador python atual
+                # sys.argv são os argumentos passados para o script
+                pkexec_cmd = ["pkexec", sys.executable] + sys.argv
+                try:
+                    os.execvp(pkexec_cmd[0], pkexec_cmd)
+                    # Se execvp retornar, significa que falhou.
+                    print("ERRO: Falha ao elevar privilégios com pkexec.")
+                    print("Por favor, execute o script como root: sudo python3 seu_script.py")
+                    logging.error("Falha ao elevar privilégios com pkexec. Pedindo execução manual com sudo.")
+                    sys.exit(1)
+                except FileNotFoundError:
+                    print(
+                        "ERRO: pkexec não encontrado. Este script precisa ser executado como root (com sudo) para gerenciar serviços no Linux.")
+                    print("Por favor, execute como: sudo python3 seu_script.py")
+                    logging.error("pkexec não encontrado. Pedindo execução manual com sudo.")
+                    sys.exit(1)
+                except Exception as e_pkexec:
+                    print(f"ERRO ao tentar usar pkexec: {e_pkexec}")
+                    print("Por favor, execute o script como root: sudo python3 seu_script.py")
+                    logging.error(f"Erro ao tentar usar pkexec: {e_pkexec}. Pedindo execução manual com sudo.")
+                    sys.exit(1)
+            else:
+                logging.info("Script já está sendo executado como root no Linux.")
+        except AttributeError:  # os.geteuid() não existe no Windows
+            pass
+        except Exception as e_priv_check:  # Qualquer outro erro na checagem de privilégios
+            print(f"Erro ao verificar privilégios: {e_priv_check}")
+            logging.error(f"Erro ao verificar privilégios no Linux: {e_priv_check}")
+            # Não sair aqui, pode ser que SYSTEMCTL_AVAILABLE seja False e não precise de root
+
     if not PIL_AVAILABLE:
-        logging.warning("Pillow (PIL) não está instalado.")
+        logging.warning(
+            "Pillow (PIL) não está instalado. Ícone da aplicação, imagem de fundo e funcionalidade de bandeja podem ser limitados ou desabilitados.")
+        # Você pode optar por mostrar uma messagebox aqui também se for crítico
+        # mas como é um warning, o logging pode ser suficiente.
     if platform.system() == "Windows" and not PYWIN32_AVAILABLE:
         logging.warning("pywin32 não instalado. Funcionalidades de serviço Windows desabilitadas.")
     if platform.system() == "Linux" and not SYSTEMCTL_AVAILABLE:
